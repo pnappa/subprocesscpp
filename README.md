@@ -79,3 +79,4 @@ Some stuff that I haven't written yet, but I wanna:
  - [X] Output streaming. Provide an iterator to allow iteration over the output lines, such that we don't have to load all in memory at once.
  - [ ] Thread-safe async lambda interactions. Provide a method to launch a process in async, but still allow writing to the list of stdin without a race condition.
  - [ ] A ping-ponging interface. This should allow incrementally providing stdin, then invoking the functor if output is emitted. Note that will likely not be possible if there's not performed asynchronously, or without using select. Using select is a bit annoying, because how do we differentiate between a command taking a while and it providing no input?
+ - [ ] Provide a way to set environment variables (i can pretty easily do it via using `execvpe`, but what should the API look like?) 
