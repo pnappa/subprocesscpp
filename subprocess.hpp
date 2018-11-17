@@ -77,7 +77,7 @@ public:
         closeUnusedEnds();
         return true;
     }
-
+  
     /**
      * sets this pipe to be the parent end of the TwoWayPipe
      * */
@@ -246,7 +246,7 @@ public:
     bool isGood() const {
         return pipe.isGood();
     }
-
+  
     /**
      * blocks until the process exits and returns the exit
      * closeUnusedEnds
