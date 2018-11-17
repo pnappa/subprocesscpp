@@ -229,6 +229,13 @@ public:
             return *this;
         }
 
+        /* post increment */
+        iterator operator++(int) {
+            iterator old(*this);
+            ++(*this);
+            return old;
+        }
+
         bool operator==(const iterator& other) const {
             return other.ps == this->ps && this->isFinished == other.isFinished;
         }
@@ -236,6 +243,8 @@ public:
         bool operator!=(const iterator& other) const {
             return !((*this) == other);
         }
+
+        
     };
 
     iterator begin() {

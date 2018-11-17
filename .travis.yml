@@ -21,6 +21,10 @@ jobs:
           os: linux
           sudo: false
           script: make && make test
+          addons:
+              apt:
+                  packages:
+                      - valgrind
         - stage: Coverage
           os: linux
           sudo: false
