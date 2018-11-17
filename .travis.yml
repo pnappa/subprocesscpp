@@ -21,3 +21,8 @@ jobs:
           os: linux
           sudo: false
           script: make && make test
+        - stage: Coverage
+          os: linux
+          sudo: false
+          secure: "X4Rwn2lBeW6K7F3wkWaqQKJFnEnVFuOtdmvX9/AY+PgNzXNitH1TuGU855ZmOEXStlVTLdXTvaY9a0TmppJ+QZWj8ABDphKexgpLKJWHKCf25mjATZQh7COXP1WKSfNJtfkhoUPjI/g3FJfwODoQkIrLMedMTNguoOGXnPviKUQOhpbVyyxckkuxBPxFjuW8y3cfD+RTiFqjYp/Vy7i8AuO15R82ikJRMYmbN5Wtup5jkz1GFBn1IWL5aoBenFEBsBsDwx9zt6jSq2Mq+H3GHFNDuU3s6k5UAaBs573Gy5km9UdR4b+8KbUXLksvZf4mWr5JhvH86SwLcAA1iWMNMcSPsZF4gortTJfTDnxdJVnKUxTVylZCXDRM0ygrQ9Z+pZex+6cr3/iUwj6sNjGGuyWWvWVtdaVtcTWZ2EICRv1IBM8SF+eBd+bGYQuJ93J1JpNyoNIpIIvj354wMDGCCAEnbpz0USOL7YqC3HfpEmRlDbtB8Xg9DQdBS7whqOgkOs4l9MhiFI1ZMY60wXlOnCWPbt0nimMlVXJhDVaUliihk0cLHvlkzyDh2Cq7rb63gnYM8287B6mQ51przJlb5LCkd8HhWfp5z3m1nSjqvPrE5UYhAhgdZyB5ubwfB7J7xR7/ub9W43Ogte+7uAQ40tXT5rcv9dZQ16GpfVscpoI="
+          script: make coverage

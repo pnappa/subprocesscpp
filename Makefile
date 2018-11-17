@@ -8,7 +8,7 @@ LIBS=-lpthread
 all: demo test
 
 clean:
-	rm -fv demo test
+	rm -fv demo test coverage
 
 demo: demo.cpp subprocess.hpp
 	$(CXX) $(CXXFLAGS) demo.cpp -o demo $(LIBS)
@@ -19,3 +19,6 @@ test: test.cpp subprocess.hpp
 	# XXX: should we make this verbose?
 	./test -s
 
+coverage: test.cpp subprocess.hpp
+	$(CXX) $(CXXFLAGS) -fprofile-arcs -ftest-coverage test.cpp -o coverage $(LIBS)
+	.codecov/run_coverage.sh
