@@ -10,13 +10,6 @@
 #include <list>
 #include <future>
 
-// unix process stuff
-#include <signal.h>
-#include <unistd.h>
-#include <sys/wait.h>
-#include <sys/prctl.h>
-#include <cstring>
-
 #include "subprocess_utils.hpp"
 
 namespace subprocess {

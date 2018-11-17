@@ -1,3 +1,16 @@
+#pragma once
+
+#include <string>
+#include <iostream>
+
+// unix process stuff
+#include <signal.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <sys/prctl.h>
+#include <cstring>
+
+
 namespace subprocess {
     
     /**
