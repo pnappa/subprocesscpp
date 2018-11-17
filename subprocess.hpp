@@ -77,7 +77,7 @@ public:
         closeUnusedEnds();
         return true;
     }
-  
+
     /**
      * sets this pipe to be the parent end of the TwoWayPipe
      * */
@@ -113,7 +113,6 @@ public:
      * */
     ssize_t readToInternalBuffer() {
         char buf[256];
-        int cnt;
         ssize_t bytesCounted = -1;
 
         while ((bytesCounted = read(input_pipe_file_descriptor[0], buf, 256)) <= 0) {
@@ -143,7 +142,6 @@ public:
         size_t firstNewLine;
         size_t currentSearchPos = 0;
         while ((firstNewLine = internalBuffer.find_first_of('\n', currentSearchPos)) == std::string::npos) {
-            size_t currentSearchPos = internalBuffer.size();
             ssize_t bytesRead = readToInternalBuffer();
             if (bytesRead < 0) {
                 std::cerr << "errno " << errno << " occurred" << std::endl;
@@ -165,7 +163,7 @@ public:
         return endOfInternalBuffer;
     }
 
-    bool closeOutput() {
+    void closeOutput() {
         close(output_pipe_file_descriptor[1]);
     }
 };
@@ -246,7 +244,7 @@ public:
     bool isGood() const {
         return pipe.isGood();
     }
-  
+
     /**
      * blocks until the process exits and returns the exit
      * closeUnusedEnds
@@ -271,52 +269,15 @@ public:
 int execute(const std::string& commandPath, const std::vector<std::string>& commandArgs,
         std::list<std::string>& stringInput /* what pumps into stdin */,
         std::function<void(std::string)> lambda) {
-    // based off https://stackoverflow.com/a/6172578
-    pid_t pid = 0;
-    int inpipefd[2];
-    int outpipefd[2];
-
-    // construct the argument list (unfortunately, the C api wasn't defined with C++ in mind, so we have to
-    // abuse const_cast) see: https://stackoverflow.com/a/190208
-    std::vector<char*> cargs;
-    // the process name must be first for execv
-    cargs.push_back(const_cast<char*>(commandPath.c_str()));
-    for (const std::string& arg : commandArgs) {
-        cargs.push_back(const_cast<char*>(arg.c_str()));
-    }
-    // must be terminated with a nullptr for execv
-    cargs.push_back(nullptr);
-
-    pipe(inpipefd);
-    pipe(outpipefd);
-    pid = fork();
-    // child
-    if (pid == 0) {
-        dup2(outpipefd[0], STDIN_FILENO);
-        dup2(inpipefd[1], STDOUT_FILENO);
-        dup2(inpipefd[1], STDERR_FILENO);
-
-        // XXX: test (close the stdin..?)
-        close(outpipefd[1]);
-
-        // ask kernel to deliver SIGTERM in case the parent dies
-        prctl(PR_SET_PDEATHSIG, SIGTERM);
-
-        execv(commandPath.c_str(), cargs.data());
-        // Nothing below this line should be executed by child process. If so,
-        // it means that the execl function wasn't successfull, so lets exit:
-        exit(1);
-    }
-
-    close(outpipefd[0]);
-    close(inpipefd[1]);
+    Process childProcess;
+    childProcess.start(commandPath, commandArgs);
 
     // while our string queue is working,
     while (!stringInput.empty()) {
         // write our input to the process's stdin pipe
         std::string newInput = stringInput.front();
         stringInput.pop_front();
-        write(outpipefd[1], newInput.c_str(), newInput.size());
+        childProcess.write(newInput);
     }
 
     childProcess.sendEOF();
@@ -327,13 +288,8 @@ int execute(const std::string& commandPath, const std::vector<std::string>& comm
     while ((input = childProcess.readLine()).size() > 0) {
         lambda(input);
     }
-    if (line != nullptr) free(line);
 
-    fclose(childStdout);
-    int status;
-    waitpid(pid, &status, 0);
-
-    return status;
+    return childProcess.waitUntilFinished();
 }
 
 /* convenience fn to return a list of outputted strings */
@@ -365,68 +321,28 @@ std::future<int> async(const std::string commandPath, const std::vector<std::str
  * and wait longer until moving on. This delay must exist, as several programs may not output a line for each
  * line input. Consider grep - it will not output a line if no match is made for that input. */
 class ProcessStream {
-    int statusCode;
-    pid_t childPid;
-    int inpipefd[2];
-    int outpipefd[2];
-    FILE* childStdout;
+    Process childProcess;
 
 public:
     ProcessStream(const std::string& commandPath, const std::vector<std::string>& commandArgs,
             std::list<std::string>& stringInput) {
-        // based off https://stackoverflow.com/a/6172578
-        childPid = 0;
-
-        // construct the argument list (unfortunately, the C api wasn't defined with C++ in mind, so we have
-        // to abuse const_cast) see: https://stackoverflow.com/a/190208
-        std::vector<char*> cargs;
-        // the process name must be first for execv
-        cargs.push_back(const_cast<char*>(commandPath.c_str()));
-        for (const std::string& arg : commandArgs) {
-            cargs.push_back(const_cast<char*>(arg.c_str()));
-        }
-        // must be terminated with a nullptr for execv
-        cargs.push_back(nullptr);
-
-        pipe(inpipefd);
-        pipe(outpipefd);
-        childPid = fork();
-        // child
-        if (childPid == 0) {
-            dup2(outpipefd[0], STDIN_FILENO);
-            dup2(inpipefd[1], STDOUT_FILENO);
-            dup2(inpipefd[1], STDERR_FILENO);
-
-            // XXX: test (close the stdin..?)
-            close(outpipefd[1]);
-
-            // ask kernel to deliver SIGTERM in case the parent dies
-            prctl(PR_SET_PDEATHSIG, SIGTERM);
-
-            execv(commandPath.c_str(), cargs.data());
-            // Nothing below this line should be executed by child process. If so,
-            // it means that the execl function wasn't successfull, so lets exit:
-            exit(1);
-        }
-
-        close(outpipefd[0]);
-        close(inpipefd[1]);
-
-        childStdout = fdopen(inpipefd[0], "r");
+        childProcess.start(commandPath, commandArgs);
 
         // while our string queue is working,
         while (!stringInput.empty()) {
-            // write our input to the process's stdin pipe
+            // write our input to the
+            // process's stdin pipe
             std::string newInput = stringInput.front();
             stringInput.pop_front();
-            write(outpipefd[1], newInput.c_str(), newInput.size());
+            childProcess.write(newInput);
         }
-        // now we finished chucking in the string, send an EOF
-        close(outpipefd[1]);
+        // now we finished chucking in the string, send
+        // an EOF
+        childProcess.sendEOF();
     }
+
     ~ProcessStream() {
-        waitpid(childPid, &statusCode, 0);
-        fclose(childStdout);
+        childProcess.waitUntilFinished();
     }
 
     struct iterator {
@@ -449,17 +365,10 @@ public:
         /* preincrement */
         iterator& operator++() {
             // iterate over each line output by the child's stdout, and call the functor
-            char* line = nullptr;
-            ssize_t nread;
-            size_t len;
-            nread = getline(&line, &len, ps->childStdout);
-            if (nread == -1) {
+            cline = ps->childProcess.readLine();
+            if (cline.empty()) {
                 isFinished = true;
-            } else {
-                cline = std::string(line);
             }
-            free(line);
-
             return *this;
         }
 
@@ -477,8 +386,6 @@ public:
         bool operator!=(const iterator& other) const {
             return !((*this) == other);
         }
-
-        
     };
 
     iterator begin() {
