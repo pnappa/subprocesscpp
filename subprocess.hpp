@@ -35,16 +35,16 @@ int execute(const std::string& commandPath,
         // write our input to the process's stdin pipe
         std::string newInput = stringInput.front();
         stringInput.pop_front();
-        childProcess.pipe.writeP(newInput);
+        childProcess.write(newInput);
     }
     
-    childProcess.pipe.closeOutput();
+    childProcess.sendEOF();
 
     // iterate over each line output by the child's stdout, and call the functor
-    std::string input = childProcess.pipe.readLine();
-    while(childProcess.pipe.isGood()){
+    std::string input = childProcess.readLine();
+    while(childProcess.isGood()) {
         lambda(input);
-        input = childProcess.pipe.readLine();
+        input = childProcess.readLine();
     }
 
     return childProcess.waitUntilFinished();
@@ -96,10 +96,10 @@ public:
             // write our input to the process's stdin pipe
             std::string newInput = stringInput.front();
             stringInput.pop_front();
-            childProcess.pipe.writeP(newInput);
+            childProcess.write(newInput);
         }
         // now we finished chucking in the string, send an EOF
-        childProcess.pipe.closeOutput();
+        childProcess.sendEOF();
     }
     
     ~ProcessStream() {
@@ -126,9 +126,8 @@ public:
         /* preincrement */
         iterator& operator++() {
             // iterate over each line output by the child's stdout, and call the functor
-            cline = ps->childProcess.pipe.readLine();
-            if(cline.empty())
-            {
+            cline = ps->childProcess.readLine();
+            if(cline.empty()) {
                 isFinished = true;
             }
             return *this;
