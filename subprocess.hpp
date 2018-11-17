@@ -231,6 +231,7 @@ public:
     }
 
     std::string readLine() {
+        if (!pipe.isGood()) return "";
         return pipe.readLine();
     }
 
@@ -285,10 +286,9 @@ int execute(const std::string& commandPath, const std::vector<std::string>& comm
 
     // iterate over each line output by the child's stdout, and call
     // the functor
-    std::string input = childProcess.readLine();
-    while (childProcess.isGood()) {
+    std::string input;
+    while ((input = childProcess.readLine()).size() > 0) {
         lambda(input);
-        input = childProcess.readLine();
     }
 
     return childProcess.waitUntilFinished();
