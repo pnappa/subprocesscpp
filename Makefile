@@ -18,6 +18,7 @@ test: test.cpp subprocess.hpp
 	# run the testsuite (-s makes it nice and verbose)
 	# XXX: should we make this verbose?
 	./test -s
+	valgrind ./test
 
 coverage: test.cpp subprocess.hpp
 	$(CXX) $(CXXFLAGS) -fprofile-arcs -ftest-coverage test.cpp -o coverage $(LIBS)
