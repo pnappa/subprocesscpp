@@ -17,7 +17,7 @@
 #include <sys/prctl.h>
 #include <cstring>
 
-#include "utils.hpp"
+#include "subprocess_utils.hpp"
 
 namespace subprocess {
 
