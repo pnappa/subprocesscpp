@@ -1,5 +1,7 @@
 # SubprocessCPP
 
+![travis build](https://img.shields.io/travis/pnappa/subprocesscpp.svg) ![codecov coverage](https://img.shields.io/codecov/c/github/pnappa/subprocesscpp.svg) ![nice](https://img.shields.io/badge/legit-this%20makes%20the%20project%20look%20better-brightgreen.svg)
+
 A neat header-only library that allows you to execute processes either synchronously or asynchronously, whilst providing input and handling the generated input. No more calling `exec` in a C++ program!
 
 This library uses some C++11 features, and tries to be as idiomatic to modern C++.
@@ -68,6 +70,17 @@ Unfortunately, I am not as familiar with Windows to write code for it, if you wa
 
 # API
 ### TODO: ....detail what each of the functions _should_ be used for.
+
+```C++
+old API (current for now):
+int execute(const std::string& commandPath, const std::vector<std::string>& commandArgs, std::list<std::string>& stringInput, std::function<void(std::string)> lambda)
+std::vector<std::string> checkOutput(const std::string& commandPath, const std::vector<std::string>& commandArgs, std::list<std::string>& stringInput, int& status)
+std::future<int> async(const std::string commandPath, const std::vector<std::string> commandArgs, std::list<std::string> stringInput, std::function<void(std::string)> lambda)
+
+// ctor for ProcessStream class
+class ProcessStream(const std::string& commandPath, const std::vector<std::string>& commandArgs, std::list<std::string>& stringInput)
+
+```
 
 # License
 This is dual-licensed under a MIT and GPLv3 license - so FOSS lovers can use it, whilst people restricted in companies to not open-source their program is also able to use this library :)

@@ -1,6 +1,6 @@
+#include <iostream>
 #include <list>
 #include <string>
-#include <iostream>
 
 #include "subprocess.hpp"
 
@@ -11,17 +11,14 @@ void echoString(std::string in) {
 int main() {
     // execute bc and pass it some equations
     std::list<std::string> inputs = {"1+1\n", "2^333\n", "32-32\n"};
-    subprocess::execute("/usr/bin/bc", 
-                              {}, 
-                              inputs, 
-                              echoString);
+    subprocess::execute("/usr/bin/bc", {}, inputs, echoString);
 
     // grep over some inputs
     inputs = {"12232\n", "hello, world\n", "Hello, world\n", "line: Hello, world!\n"};
     subprocess::execute("/bin/grep", {"-i", "Hello, world"}, inputs, echoString);
 
     // execute a process and extract all lines outputted
-    inputs.clear(); // provide no stdin
+    inputs.clear();  // provide no stdin
     int status;
     std::vector<std::string> vec = subprocess::checkOutput("/usr/bin/time", {"sleep", "1"}, inputs, status);
     for (const std::string& s : vec) {
@@ -37,8 +34,10 @@ int main() {
     std::cout << "sleep executed with exit status: " << futureStatus.get() << std::endl;
 
     // simulate pipes between programs: lets launch cat to provide input into a grep process!
-    // Note! This will read all output into a single vector, then provide this as input into the second process
-    //      If you want a function that isn't as memory intensive, consider streamOutput, which provides an iterator interface
+    // Note! This will read all output into a single vector, then provide this as input into the second
+    // process
+    //      If you want a function that isn't as memory intensive, consider streamOutput, which provides an
+    //      iterator interface
     inputs = {"12232\n", "hello, world\n", "Hello, world\n", "line: Hello, world!\n"};
     vec = subprocess::checkOutput("/bin/cat", {}, inputs, status);
     inputs = std::list<std::string>(vec.begin(), vec.end());
