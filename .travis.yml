@@ -1,0 +1,23 @@
+language: generic
+dist: trusty
+before_install:
+    - ./.travis/preinstall.sh
+
+jobs:
+    include:
+        - stage: Style
+          os: linux
+          sudo: false
+          script: .travis/run_test_format.sh
+          addons:
+              apt:
+                  sources:
+                      - llvm-toolchain-trusty-6.0
+                      - ubuntu-toolchain-r-test
+                  packages:
+                      - clang-format-6.0
+                      - libstdc++-7-dev
+        - stage: UnitTests
+          os: linux
+          sudo: false
+          script: make && make test

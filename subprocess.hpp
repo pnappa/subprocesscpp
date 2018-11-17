@@ -1,36 +1,34 @@
 #pragma once
 
-#include <string>
-#include <stdexcept>
-#include <iostream>
 #include <algorithm>
 #include <functional>
+#include <future>
+#include <iostream>
+#include <list>
+#include <stdexcept>
+#include <string>
 #include <tuple>
 #include <vector>
-#include <list>
-#include <future>
 
 // unix process stuff
-#include <signal.h>
-#include <unistd.h>
-#include <sys/wait.h>
-#include <sys/prctl.h>
 #include <cstring>
-
-
+#include <signal.h>
+#include <sys/prctl.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 namespace subprocess {
 
-/** 
+/**
  * Execute a process, inputting stdin and calling the functor with the stdout lines.
  * @param commandPath - an absolute string to the program path
  * @param commandArgs - a vector of arguments that will be passed to the process
- * @param stringInput - a feed of strings that feed into the process (you'll typically want to end them with a newline)
+ * @param stringInput - a feed of strings that feed into the process (you'll typically want to end them with a
+ * newline)
  * @param lambda - the function to execute with every line output by the process
  * @return the exit status of the process
  * */
-int execute(const std::string& commandPath, 
-        const std::vector<std::string>& commandArgs, 
+int execute(const std::string& commandPath, const std::vector<std::string>& commandArgs,
         std::list<std::string>& stringInput /* what pumps into stdin */,
         std::function<void(std::string)> lambda) {
     // based off https://stackoverflow.com/a/6172578
@@ -38,8 +36,8 @@ int execute(const std::string& commandPath,
     int inpipefd[2];
     int outpipefd[2];
 
-    // construct the argument list (unfortunately, the C api wasn't defined with C++ in mind, so we have to abuse const_cast)
-    // see: https://stackoverflow.com/a/190208
+    // construct the argument list (unfortunately, the C api wasn't defined with C++ in mind, so we have to
+    // abuse const_cast) see: https://stackoverflow.com/a/190208
     std::vector<char*> cargs;
     // the process name must be first for execv
     cargs.push_back(const_cast<char*>(commandPath.c_str()));
@@ -61,11 +59,11 @@ int execute(const std::string& commandPath,
         // XXX: test (close the stdin..?)
         close(outpipefd[1]);
 
-        //ask kernel to deliver SIGTERM in case the parent dies
+        // ask kernel to deliver SIGTERM in case the parent dies
         prctl(PR_SET_PDEATHSIG, SIGTERM);
-        
+
         execv(commandPath.c_str(), cargs.data());
-        // Nothing below this line should be executed by child process. If so, 
+        // Nothing below this line should be executed by child process. If so,
         // it means that the execl function wasn't successfull, so lets exit:
         exit(1);
     }
@@ -73,7 +71,7 @@ int execute(const std::string& commandPath,
     close(outpipefd[0]);
     close(inpipefd[1]);
 
-    // while our string queue is working, 
+    // while our string queue is working,
     while (!stringInput.empty()) {
         // write our input to the process's stdin pipe
         std::string newInput = stringInput.front();
@@ -89,7 +87,7 @@ int execute(const std::string& commandPath,
     ssize_t nread;
     size_t len;
     while ((nread = getline(&line, &len, childStdout)) != -1) {
-        lambda(std::string(line)); 
+        lambda(std::string(line));
 
         // free up the memory allocated by getline
         free(line);
@@ -105,36 +103,33 @@ int execute(const std::string& commandPath,
 }
 
 /* convenience fn to return a list of outputted strings */
-std::vector<std::string> checkOutput(const std::string& commandPath, 
-        const std::vector<std::string>& commandArgs, 
-        std::list<std::string>& stringInput /* what pumps into stdin */,
-        int& status) {
+std::vector<std::string> checkOutput(const std::string& commandPath,
+        const std::vector<std::string>& commandArgs,
+        std::list<std::string>& stringInput /* what pumps into stdin */, int& status) {
     std::vector<std::string> retVec;
-    status = execute(commandPath, commandArgs, stringInput, [&](std::string s) { retVec.push_back(std::move(s)); });
+    status = execute(
+            commandPath, commandArgs, stringInput, [&](std::string s) { retVec.push_back(std::move(s)); });
     return retVec;
 }
 
 /* spawn the process in the background asynchronously, and return a future of the status code */
-std::future<int> async(const std::string commandPath, const std::vector<std::string> commandArgs, std::list<std::string> stringInput, std::function<void(std::string)> lambda) {
+std::future<int> async(const std::string commandPath, const std::vector<std::string> commandArgs,
+        std::list<std::string> stringInput, std::function<void(std::string)> lambda) {
     // spawn the function async - we must pass the args by value into the async lambda
     // otherwise they may destruct before the execute fn executes!
     // whew, that was an annoying bug to find...
-    return std::async(std::launch::async, 
-            [&](const std::string cp, 
-                const std::vector<std::string> ca,
-                std::list<std::string> si,
-                std::function<void(std::string)> l) { return execute(cp, ca, si, l); }, commandPath, commandArgs, stringInput, lambda);
+    return std::async(std::launch::async,
+            [&](const std::string cp, const std::vector<std::string> ca, std::list<std::string> si,
+                    std::function<void(std::string)> l) { return execute(cp, ca, si, l); },
+            commandPath, commandArgs, stringInput, lambda);
 }
 
-
-/* TODO: refactor up this function so that there isn't duplicated code - most of this is identical to the execute fn
- * execute a program and stream the output after each line input 
- * this function calls select to check if outputs needs to be pumped after each line input. 
- * This means that if the line takes too long to output, 
- *  it may be not input into the functor until another line is fed in.
- * You may modify the delay to try and wait longer until moving on.
- * This delay must exist, as several programs may not output a line for each line input.
- *  Consider grep - it will not output a line if no match is made for that input. */
+/* TODO: refactor up this function so that there isn't duplicated code - most of this is identical to the
+ * execute fn execute a program and stream the output after each line input this function calls select to
+ * check if outputs needs to be pumped after each line input. This means that if the line takes too long to
+ * output, it may be not input into the functor until another line is fed in. You may modify the delay to try
+ * and wait longer until moving on. This delay must exist, as several programs may not output a line for each
+ * line input. Consider grep - it will not output a line if no match is made for that input. */
 class ProcessStream {
     int statusCode;
     pid_t childPid;
@@ -142,15 +137,14 @@ class ProcessStream {
     int outpipefd[2];
     FILE* childStdout;
 
-    public:
-    ProcessStream(const std::string& commandPath, 
-            const std::vector<std::string>& commandArgs,
+public:
+    ProcessStream(const std::string& commandPath, const std::vector<std::string>& commandArgs,
             std::list<std::string>& stringInput) {
         // based off https://stackoverflow.com/a/6172578
         childPid = 0;
 
-        // construct the argument list (unfortunately, the C api wasn't defined with C++ in mind, so we have to abuse const_cast)
-        // see: https://stackoverflow.com/a/190208
+        // construct the argument list (unfortunately, the C api wasn't defined with C++ in mind, so we have
+        // to abuse const_cast) see: https://stackoverflow.com/a/190208
         std::vector<char*> cargs;
         // the process name must be first for execv
         cargs.push_back(const_cast<char*>(commandPath.c_str()));
@@ -172,11 +166,11 @@ class ProcessStream {
             // XXX: test (close the stdin..?)
             close(outpipefd[1]);
 
-            //ask kernel to deliver SIGTERM in case the parent dies
+            // ask kernel to deliver SIGTERM in case the parent dies
             prctl(PR_SET_PDEATHSIG, SIGTERM);
 
             execv(commandPath.c_str(), cargs.data());
-            // Nothing below this line should be executed by child process. If so, 
+            // Nothing below this line should be executed by child process. If so,
             // it means that the execl function wasn't successfull, so lets exit:
             exit(1);
         }
@@ -186,7 +180,7 @@ class ProcessStream {
 
         childStdout = fdopen(inpipefd[0], "r");
 
-        // while our string queue is working, 
+        // while our string queue is working,
         while (!stringInput.empty()) {
             // write our input to the process's stdin pipe
             std::string newInput = stringInput.front();
@@ -209,10 +203,10 @@ class ProcessStream {
 
         iterator(ProcessStream* ps) : ps(ps) {
             // increment this ptr, because nothing exists initially
-            ++(*this); 
+            ++(*this);
         }
         // ctor for end()
-        iterator(ProcessStream* ps, bool) : ps(ps), isFinished(true) {} 
+        iterator(ProcessStream* ps, bool) : ps(ps), isFinished(true) {}
 
         const std::string& operator*() const {
             return cline;
@@ -235,8 +229,8 @@ class ProcessStream {
             return *this;
         }
 
-        bool operator==(const iterator& other) const { 
-            return other.ps == this->ps && this->isFinished == other.isFinished; 
+        bool operator==(const iterator& other) const {
+            return other.ps == this->ps && this->isFinished == other.isFinished;
         }
 
         bool operator!=(const iterator& other) const {
@@ -253,4 +247,4 @@ class ProcessStream {
     }
 };
 
-} // end namespace subprocess
+}  // end namespace subprocess
