@@ -1,4 +1,9 @@
 namespace subprocess {
+    
+    /**
+     * A TwoWayPipe that allows reading and writing between two processes
+     * must call initialize before being passed between processes or used
+     * */
 class TwoWayPipe {
 	private:
 		//[0] is the output end of each pipe and [1] is the input end of each pipe
@@ -8,11 +13,19 @@ class TwoWayPipe {
         bool inStreamGood = true;
         
 	public:
-		TwoWayPipe() {
+		TwoWayPipe() = default;
+		
+		/**
+		 * initializes the TwoWayPipe the pipe can not be used until this is called
+		 * */
+		void initialize(){
 			pipe(input_pipe_file_descriptor);
 			pipe(output_pipe_file_descriptor);
 		}
 	private:
+	    /**
+	     * closes the ends that aren't used (do we need to do this?
+	     * */
 		void closeUnusedEnds() {
 			//we don't need the input end of the input pipe or the output end of the output pipe
 			close(input_pipe_file_descriptor[1]);
@@ -20,6 +33,11 @@ class TwoWayPipe {
 		}
 
 	public:
+	
+	    /**
+         * sets this to be the child end of the TwoWayPipe
+         * linking the input and output ends to stdin and stdout/stderr
+         * */
 		bool setAsChildEnd() {
 		    int tmp[2] = {input_pipe_file_descriptor[0],input_pipe_file_descriptor[1]};
 
@@ -34,16 +52,26 @@ class TwoWayPipe {
 
 			closeUnusedEnds();
 		}
-
+        
+        /**
+         * sets this pipe to be the parent end of the TwoWayPipe
+         * */
 		bool setAsParentEnd() {
 			closeUnusedEnds();
 		}
-
-		size_t writeP(std::string &input) {
+        
+        /**
+         * writes a string to the pipe 
+         * @param input - the string to write
+         * @return the number of bytes written
+         * */
+		size_t writeP(const std::string &input) {
 			return write(output_pipe_file_descriptor[1], input.c_str(), input.size());
 		}
 
-        
+        /**
+         * @return true unless the last call to read either failed or reached EOF
+         * */
         bool isGood(){
             return inStreamGood;
         }
@@ -57,27 +85,28 @@ class TwoWayPipe {
         {
             char buf[256];
             int cnt;
-            size_t bytesCounted = -1;
+            ssize_t bytesCounted = -1;
 
-            bytesCounted = read(input_pipe_file_descriptor[0], buf, 256);
-        	if (bytesCounted < 0) {
-        	    if (errno != EINTR){ /* interrupted by sig handler return */
-        	        inStreamGood = false;
-            		return -1;
-        	    }
-        	}
-        	else if (bytesCounted == 0)  /* EOF */
-        	{
-        	    inStreamGood = false;
-        	    return 0;
-        	}
-
+            while((bytesCounted = read(input_pipe_file_descriptor[0], buf, 256))<=0){
+            	if (bytesCounted < 0) {
+            	    if (errno != EINTR){ /* interrupted by sig handler return */
+            	        inStreamGood = false;
+                		return -1;
+            	    }
+            	}
+            	else if (bytesCounted == 0)  /* EOF */
+            	{
+            	    inStreamGood = false;
+            	    return 0;
+            	}
+            }
+            
             internalBuffer.append(buf,bytesCounted);
             return bytesCounted;
         }
 
 		/**
-		* read line from the pipe
+		* read line from the pipe - Not threadsafe
 		* blocks until either a newline is read or the other end of the pipe is closed
 		* @return the string read from the pipe or the empty string if there was not a line to read.
 		* */
@@ -87,7 +116,11 @@ class TwoWayPipe {
 		    while((firstNewLine = internalBuffer.find_first_of('\n',currentSearchPos))==std::string::npos)
 		    {
 		        size_t currentSearchPos = internalBuffer.size();
-		        size_t bytesRead = readToInternalBuffer();
+		        ssize_t bytesRead = readToInternalBuffer();
+		        if(bytesRead<0){
+		            std::cerr << "errno " << errno << " occurred" << std::endl;
+		            return "";
+		        }
 		        if(bytesRead==0)
 		        {
 		            return internalBuffer;
@@ -107,5 +140,67 @@ class TwoWayPipe {
 		bool closeOutput(){
 			close(output_pipe_file_descriptor[1]);
 		}
+	};
+	
+	/**
+	 * A Process class that wraps the creation of a seperate process
+	 * and gives acces to a TwoWayPipe to that process and its pid
+	 * The Process is not in a valid state until start is called
+	 * This class does not have ownership of the process, it merely maintains a connection
+	 * */
+	class Process{
+	    public:
+	    pid_t pid;
+	    TwoWayPipe pipe;
+	    
+	    Process() = default;
+	    
+	    /**
+	     * Starts a seperate process with the provided command and arguments
+	     * This also initializes the TwoWayPipe
+	     * @param commandPath - an absolute string to the program path
+         * @param commandArgs - an iterable container of strings that will be passed as arguments
+         * @return TODO return errno returned by child call of execv (need to use the TwoWayPipe)
+	     * */
+	    template <class Iterable>
+	    void start(const std::string& commandPath,Iterable& args){
+	        
+	        pid = 0;
+            pipe.initialize();
+            // construct the argument list (unfortunately, the C api wasn't defined with C++ in mind, so we have to abuse const_cast)
+            // see: https://stackoverflow.com/a/190208
+            std::vector<char*> cargs;
+            // the process name must be first for execv
+            cargs.push_back(const_cast<char*>(commandPath.c_str()));
+            for (const std::string& arg : args) {
+                cargs.push_back(const_cast<char*>(arg.c_str()));
+            }
+            // must be terminated with a nullptr for execv
+            cargs.push_back(nullptr);
+        
+            pid = fork();
+            // child
+            if (pid == 0) {
+                pipe.setAsChildEnd();
+        
+                //ask kernel to deliver SIGTERM in case the parent dies
+                prctl(PR_SET_PDEATHSIG, SIGTERM);
+                
+                execv(commandPath.c_str(), cargs.data());
+                // Nothing below this line should be executed by child process. If so, 
+                // it means that the execl function wasn't successfull, so lets exit:
+                exit(1);
+            }
+            pipe.setAsParentEnd();
+	    }
+	    
+	    /**
+	     * blocks until the process exits and returns the exit closeUnusedEnds
+	     * */
+	    int waitUntilFinished(){
+	        int status;
+            waitpid(pid, &status, 0);
+            return status;
+	    }
 	};
 }
