@@ -17,7 +17,7 @@
 #include <sys/prctl.h>
 #include <cstring>
 
-
+#include "utils.hpp"
 
 namespace subprocess {
 
@@ -33,10 +33,9 @@ int execute(const std::string& commandPath,
         const std::vector<std::string>& commandArgs, 
         std::list<std::string>& stringInput /* what pumps into stdin */,
         std::function<void(std::string)> lambda) {
-    // based off https://stackoverflow.com/a/6172578
+
     pid_t pid = 0;
-    int inpipefd[2];
-    int outpipefd[2];
+    TwoWayPipe p;
 
     // construct the argument list (unfortunately, the C api wasn't defined with C++ in mind, so we have to abuse const_cast)
     // see: https://stackoverflow.com/a/190208
@@ -49,17 +48,10 @@ int execute(const std::string& commandPath,
     // must be terminated with a nullptr for execv
     cargs.push_back(nullptr);
 
-    pipe(inpipefd);
-    pipe(outpipefd);
     pid = fork();
     // child
     if (pid == 0) {
-        dup2(outpipefd[0], STDIN_FILENO);
-        dup2(inpipefd[1], STDOUT_FILENO);
-        dup2(inpipefd[1], STDERR_FILENO);
-
-        // XXX: test (close the stdin..?)
-        close(outpipefd[1]);
+        p.setAsChildEnd();
 
         //ask kernel to deliver SIGTERM in case the parent dies
         prctl(PR_SET_PDEATHSIG, SIGTERM);
@@ -69,35 +61,25 @@ int execute(const std::string& commandPath,
         // it means that the execl function wasn't successfull, so lets exit:
         exit(1);
     }
-
-    close(outpipefd[0]);
-    close(inpipefd[1]);
+    p.setAsParentEnd();
 
     // while our string queue is working, 
     while (!stringInput.empty()) {
         // write our input to the process's stdin pipe
         std::string newInput = stringInput.front();
         stringInput.pop_front();
-        write(outpipefd[1], newInput.c_str(), newInput.size());
+        p.writeP(newInput);
     }
     // now we finished chucking in the string, send an EOF
-    close(outpipefd[1]);
+    p.closeOutput();
 
     // iterate over each line output by the child's stdout, and call the functor
-    FILE* childStdout = fdopen(inpipefd[0], "r");
-    char* line = nullptr;
-    ssize_t nread;
-    size_t len;
-    while ((nread = getline(&line, &len, childStdout)) != -1) {
-        lambda(std::string(line)); 
-
-        // free up the memory allocated by getline
-        free(line);
-        line = nullptr;
+    std::string input = p.readLine();
+    while(p.isGood()){
+        lambda(input);
+        input = p.readLine();
     }
-    if (line != nullptr) free(line);
 
-    fclose(childStdout);
     int status;
     waitpid(pid, &status, 0);
 
@@ -138,14 +120,12 @@ std::future<int> async(const std::string commandPath, const std::vector<std::str
 class ProcessStream {
     int statusCode;
     pid_t childPid;
-    int inpipefd[2];
-    int outpipefd[2];
-    FILE* childStdout;
+    TwoWayPipe p;
 
-    public:
-    ProcessStream(const std::string& commandPath, 
-            const std::vector<std::string>& commandArgs,
-            std::list<std::string>& stringInput) {
+public:
+    ProcessStream(const std::string& commandPath,
+        const std::vector<std::string>& commandArgs,
+        std::list<std::string>& stringInput) {
         // based off https://stackoverflow.com/a/6172578
         childPid = 0;
 
@@ -160,17 +140,10 @@ class ProcessStream {
         // must be terminated with a nullptr for execv
         cargs.push_back(nullptr);
 
-        pipe(inpipefd);
-        pipe(outpipefd);
         childPid = fork();
         // child
         if (childPid == 0) {
-            dup2(outpipefd[0], STDIN_FILENO);
-            dup2(inpipefd[1], STDOUT_FILENO);
-            dup2(inpipefd[1], STDERR_FILENO);
-
-            // XXX: test (close the stdin..?)
-            close(outpipefd[1]);
+            p.setAsChildEnd();
 
             //ask kernel to deliver SIGTERM in case the parent dies
             prctl(PR_SET_PDEATHSIG, SIGTERM);
@@ -181,24 +154,20 @@ class ProcessStream {
             exit(1);
         }
 
-        close(outpipefd[0]);
-        close(inpipefd[1]);
-
-        childStdout = fdopen(inpipefd[0], "r");
+        p.setAsParentEnd();
 
         // while our string queue is working, 
         while (!stringInput.empty()) {
             // write our input to the process's stdin pipe
             std::string newInput = stringInput.front();
             stringInput.pop_front();
-            write(outpipefd[1], newInput.c_str(), newInput.size());
+            p.writeP(newInput);
         }
         // now we finished chucking in the string, send an EOF
-        close(outpipefd[1]);
+        p.closeOutput();
     }
     ~ProcessStream() {
         waitpid(childPid, &statusCode, 0);
-        fclose(childStdout);
     }
 
     struct iterator {
@@ -221,17 +190,11 @@ class ProcessStream {
         /* preincrement */
         iterator& operator++() {
             // iterate over each line output by the child's stdout, and call the functor
-            char* line = nullptr;
-            ssize_t nread;
-            size_t len;
-            nread = getline(&line, &len, ps->childStdout);
-            if (nread == -1) {
+            cline = ps->p.readLine();
+            if(cline.empty())
+            {
                 isFinished = true;
-            } else {
-                cline = std::string(line);
             }
-            free(line);
-
             return *this;
         }
 
