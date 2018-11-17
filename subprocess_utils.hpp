@@ -24,7 +24,7 @@ class TwoWayPipe {
 		int output_pipe_file_descriptor[2];
         std::string internalBuffer;
         bool inStreamGood = true;
-        
+        bool isChild = false;
 	public:
 		TwoWayPipe() = default;
 		
@@ -50,8 +50,11 @@ class TwoWayPipe {
 	    /**
          * sets this to be the child end of the TwoWayPipe
          * linking the input and output ends to stdin and stdout/stderr
+         * This call does nothing if it is already set as the child end
          * */
 		bool setAsChildEnd() {
+		    if(isChild) return true;
+		    isChild = true;
 		    int tmp[2] = {input_pipe_file_descriptor[0],input_pipe_file_descriptor[1]};
 
 		    input_pipe_file_descriptor[0] = output_pipe_file_descriptor[0];
