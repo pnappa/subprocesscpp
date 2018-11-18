@@ -257,6 +257,66 @@ public:
 };
 
 /**
+ * Execute a subprocess and optionally call a function per line of stdout.
+ * @param commandPath   - the path of the executable to execute, e.g. "/bin/cat"
+ * @param commandArgs   - the extra arguments for an executable e.g. {"argument 1", "henlo"}
+ * @param stdinInput    - a list of inputs that will be piped into the processes' stdin
+ * @param lambda        - a function that is called with every line from the executed process (default NOP function)
+ * @param env           - a list of environment variables that the process will execute with (default nothing)
+ */
+int execute(const std::string& commandPath, const std::vector<std::string>& commandArgs, const std::vector<std::string>& stdinInput, const std::function<void(std::string)>& lambda = [](std::string){}, const std::vector<std::string>& env = {});
+
+/**
+ * Execute a subprocess and optionally call a function per line of stdout.
+ * @param commandPath   - the path of the executable to execute, e.g. "/bin/cat"
+ * @param commandArgs   - the extra arguments for an executable e.g. {"argument 1", "henlo"}
+ * @param stdinBegin    - an InputIterator to provide stdin
+ * @param stdinEnd      - the end of the InputIterator range for stdin
+ * @param lambda        - a function that is called with every line from the executed process (default NOP function)
+ * @param env           - a list of environment variables that the process will execute with (default nothing)
+ */
+template<class InputIt>
+int execute(const std::string& commandPath, const std::vector<std::string>& commandArgs, InputIt stdinBegin, InputIt stdinEnd, const std::function<void(std::string)>& lambda = [](std::string){}, const std::vector<std::string>& env = {});
+
+/**
+ * Execute a subprocess and retrieve the output of the command
+ * @param commandPath   - the path of the executable to execute, e.g. "/bin/cat"
+ * @param commandArgs   - the extra arguments for an executable e.g. {"argument 1", "henlo"}
+ * @param stdinInput    - a list of inputs that will be piped into the processes' stdin
+ * @param env           - a list of environment variables that the process will execute with (default nothing)
+ */
+std::vector<std::string> check_output(const std::string& commandPath, const std::vector<std::string>& commandArgs, const std::vector<std::string>& stdioInput, const std::vector<std::string>& env = {});
+
+/**
+ * Execute a subprocess and retrieve the output of the command
+ * @param commandPath   - the path of the executable to execute, e.g. "/bin/cat"
+ * @param commandArgs   - the extra arguments for an executable e.g. {"argument 1", "henlo"}
+ * @param stdinBegin    - an InputIterator to provide stdin
+ * @param stdinEnd      - the end of the InputIterator range for stdin
+ * @param env           - a list of environment variables that the process will execute with (default nothing)
+ */
+template<class InputIt>
+std::vector<std::string> check_output(const std::string& commandPath, const std::vector<std::string>& commandArgs, InputIt stdioBegin, InputIt stdioEnd, const std::vector<std::string>& env = {});
+
+// TODO: what if the process terminates? consider error handling potentials...
+class ProcessStream {
+    public:
+        ProcessStream(const std::string& commandPath, const std::vector<std::string>& commandArgs);
+
+        // write a line to the subprocess's stdin
+        void write(const std::string& inputLine);
+        // read a line and block until received (or until timeout reached)
+        template<typename Rep>
+        std::string read(std::chrono::duration<Rep> timeout=-1);
+        // if there is a line for reading
+        template<typename Rep>
+        bool ready(std::chrono::duration<Rep> timeout=0);
+
+        ProcessStream& operator<<(const std::string& inputLine);
+        ProcessStream& operator>>(std::string& outputLine);
+};
+
+/**
  * Execute a process, inputting stdin and calling the functor with the stdout
  * lines.
  * @param commandPath - an absolute string to the program path
