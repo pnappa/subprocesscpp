@@ -141,6 +141,7 @@ public:
     std::string readLine() {
         size_t firstNewLine;
         size_t currentSearchPos = 0;
+
         while ((firstNewLine = internalBuffer.find_first_of('\n', currentSearchPos)) == std::string::npos) {
             ssize_t bytesRead = readToInternalBuffer();
             if (bytesRead < 0) {
@@ -191,6 +192,10 @@ public:
             }
             currentSearchPos = internalBuffer.size();
             if (!canReadFromInPipe()) {
+                // if there is data in the buffer then you can still read a line
+                if (internalBuffer.size() > 0) {
+                    return true;
+                }
                 return false;
             }
 
