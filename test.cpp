@@ -108,6 +108,7 @@ TEST_CASE("output iterator handles empty output", "[subprocess::ProcessStream]")
     std::vector<std::string> expectedOutput = {};
     std::vector<std::string> outputs;
     for (std::string out : ps) {
+        FAIL("why do we have output!!! - " << out);
         outputs.push_back(out);
     }
 
@@ -138,6 +139,7 @@ TEST_CASE("output iterator all operator overload testing", "[subprocess::Process
     REQUIRE(*beg == expectedOutput.front());
     expectedOutput.pop_front();
 
+    beg++;
     REQUIRE(beg == end);
     REQUIRE(expectedOutput.size() == 0);
 }
