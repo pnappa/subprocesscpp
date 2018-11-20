@@ -33,7 +33,8 @@ private:
     std::string internalBuffer;
     bool inStreamGood = true;
     bool endSelected = false;
-
+    bool initialized = false;
+    size_t currentSearchPos = 0;
     /**
      * closes the ends that aren't used (do we need to do this?
      * */
@@ -52,8 +53,16 @@ public:
      * this is called
      * */
     void initialize() {
-        pipe(input_pipe_file_descriptor);
-        pipe(output_pipe_file_descriptor);
+        if (initialized) {
+            return;
+        }
+        int res = pipe(input_pipe_file_descriptor);
+        res += pipe(output_pipe_file_descriptor);
+        if (res < 0) {
+            // error occurred, check errno and throw relevant exception
+        } else {
+            initialized = true;
+        }
     }
 
     /**
@@ -140,9 +149,9 @@ public:
      * */
     std::string readLine() {
         size_t firstNewLine;
-        size_t currentSearchPos = 0;
 
         while ((firstNewLine = internalBuffer.find_first_of('\n', currentSearchPos)) == std::string::npos) {
+            currentSearchPos = internalBuffer.size();
             ssize_t bytesRead = readToInternalBuffer();
             if (bytesRead < 0) {
                 std::cerr << "errno " << errno << " occurred" << std::endl;
@@ -159,16 +168,18 @@ public:
 
         internalBuffer.erase(firstNewLine + 1);
         internalBuffer.swap(endOfInternalBuffer);
-
+        currentSearchPos = 0;
         // now contains the first characters up to and
         // including the newline character
         return endOfInternalBuffer;
     }
 
-    bool canReadFromInPipe() {
-        if (!inStreamGood) {
-            return false;
-        }
+    /**
+     * tests pipe state, returns short which represents the status
+     * if POLLIN bit is set then it can be read from, if POLLHUP bit is
+     * set then the write end has closed.
+     * */
+    short inPipeState() {
         // file descriptor struct to check if pollin bit will be set
         struct pollfd fds = {.fd = input_pipe_file_descriptor[0], .events = POLLIN};
         // poll with no wait time
@@ -181,29 +192,41 @@ public:
             // TODO
             // an error occurred, check errno then throw exception if it is critical
         }
-        return fds.revents & POLLIN;
+        // check if there is either data in the pipe or the other end is closed
+        //(in which case a call will not block, it will simply return 0 bytes)
+        return fds.revents;
     }
 
     bool canReadLine() {
-        size_t currentSearchPos = 0;
+        if (!inStreamGood) {
+            return false;
+        }
         while (true) {
-            if (internalBuffer.find_first_of('\n', currentSearchPos) != std::string::npos) {
+            size_t firstNewLine = internalBuffer.find_first_of('\n', currentSearchPos);
+            if (firstNewLine != std::string::npos) {
+                // this means that the next call to readLine won't
+                // have to search through the whole string again
+                currentSearchPos = firstNewLine;
                 return true;
             }
             currentSearchPos = internalBuffer.size();
-            if (!canReadFromInPipe()) {
-                // if there is data in the buffer then you can still read a line
-                if (internalBuffer.size() > 0) {
+            short pipeState = inPipeState();
+            if (!(pipeState & POLLIN)) {               // no bytes to read in pipe
+                if (pipeState & POLLHUP) {             // the write end has closed
+                    if (internalBuffer.size() == 0) {  // and theres no bytes in the buffer
+                                                       // this pipe is done
+                        inStreamGood = false;
+                        return false;
+                    }
+                    // the buffer can be read as the final string
                     return true;
                 }
+                // pipe is still good, it just hasn't got anything in it
                 return false;
             }
 
             ssize_t bytesRead = readToInternalBuffer();
-            if (bytesRead == 0)  // EOF this can be read from
-            {
-                return true;
-            }
+
             if (bytesRead < 0) {
                 // error check errno and throw exception
                 return false;  // for now just return false
