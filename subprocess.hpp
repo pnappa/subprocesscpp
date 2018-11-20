@@ -46,6 +46,54 @@ private:
         close(output_pipe_file_descriptor[0]);
     }
 
+    /**
+     * reads up to n bytes into the internal buffer
+     * @param n - the max number of bytes to read in
+     * @return the number of bytes read in, -1 in the case of an
+     * error
+     * */
+    ssize_t readToInternalBuffer() {
+        char buf[256];
+        ssize_t bytesCounted = -1;
+
+        while ((bytesCounted = read(input_pipe_file_descriptor[0], buf, 256)) <= 0) {
+            if (bytesCounted < 0) {
+                if (errno != EINTR) { /* interrupted by sig handler return */
+                    inStreamGood = false;
+                    return -1;
+                }
+            } else if (bytesCounted == 0) { /* EOF */
+                return 0;
+            }
+        }
+
+        internalBuffer.append(buf, bytesCounted);
+        return bytesCounted;
+    }
+
+    /**
+     * tests pipe state, returns short which represents the status.
+     * If POLLIN bit is set then it can be read from, if POLLHUP bit is
+     * set then the write end has closed.
+     * */
+    short inPipeState(long wait_ms) {
+        // file descriptor struct to check if pollin bit will be set
+        struct pollfd fds = {.fd = input_pipe_file_descriptor[0], .events = POLLIN};
+        // poll with no wait time
+        int res = poll(&fds, 1, wait_ms);
+
+        // if res < 0 then an error occurred with poll
+        // POLLERR is set for some other errors
+        // POLLNVAL is set if the pipe is closed
+        if (res < 0 || fds.revents & (POLLERR | POLLNVAL)) {
+            // TODO
+            // an error occurred, check errno then throw exception if it is critical
+        }
+        // check if there is either data in the pipe or the other end is closed
+        //(in which case a call will not block, it will simply return 0 bytes)
+        return fds.revents;
+    }
+
 public:
     TwoWayPipe() = default;
 
@@ -117,31 +165,6 @@ public:
     }
 
     /**
-     * reads up to n bytes into the internal buffer
-     * @param n - the max number of bytes to read in
-     * @return the number of bytes read in, -1 in the case of an
-     * error
-     * */
-    ssize_t readToInternalBuffer() {
-        char buf[256];
-        ssize_t bytesCounted = -1;
-
-        while ((bytesCounted = read(input_pipe_file_descriptor[0], buf, 256)) <= 0) {
-            if (bytesCounted < 0) {
-                if (errno != EINTR) { /* interrupted by sig handler return */
-                    inStreamGood = false;
-                    return -1;
-                }
-            } else if (bytesCounted == 0) { /* EOF */
-                return 0;
-            }
-        }
-
-        internalBuffer.append(buf, bytesCounted);
-        return bytesCounted;
-    }
-
-    /**
      * Read line from the pipe - Not threadsafe
      * Blocks until either a newline is read
      *  or the other end of the pipe is closed
@@ -173,29 +196,6 @@ public:
         // now contains the first characters up to and
         // including the newline character
         return endOfInternalBuffer;
-    }
-
-    /**
-     * tests pipe state, returns short which represents the status.
-     * If POLLIN bit is set then it can be read from, if POLLHUP bit is
-     * set then the write end has closed.
-     * */
-    short inPipeState(long wait_ms) {
-        // file descriptor struct to check if pollin bit will be set
-        struct pollfd fds = {.fd = input_pipe_file_descriptor[0], .events = POLLIN};
-        // poll with no wait time
-        int res = poll(&fds, 1, wait_ms);
-
-        // if res < 0 then an error occurred with poll
-        // POLLERR is set for some other errors
-        // POLLNVAL is set if the pipe is closed
-        if (res < 0 || fds.revents & (POLLERR | POLLNVAL)) {
-            // TODO
-            // an error occurred, check errno then throw exception if it is critical
-        }
-        // check if there is either data in the pipe or the other end is closed
-        //(in which case a call will not block, it will simply return 0 bytes)
-        return fds.revents;
     }
 
     bool canReadLine(long wait_ms) {
@@ -310,7 +310,7 @@ public:
         }
         auto end = std::chrono::high_resolution_clock::now() + timeout;
         auto ms_remaining = std::chrono::duration_cast<std::chrono::milliseconds>(timeout);
-        
+
         do {
             if (pipe.canReadLine(std::max(ms_remaining.count(), 0L))) {
                 return true;
