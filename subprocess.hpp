@@ -4,11 +4,16 @@
 #include <functional>
 #include <future>
 #include <iostream>
+#include <iterator>
 #include <list>
 #include <stdexcept>
 #include <string>
 #include <tuple>
 #include <vector>
+#include <type_traits>
+#include <iterator>
+#include <vector>
+#include <utility>
 
 // unix process stuff
 #include <cstring>
@@ -179,8 +184,46 @@ class Process {
     pid_t pid;
     TwoWayPipe pipe;
 
+    const std::string commandPath;
+    std::vector<char*> processArgs;
+    std::vector<char*> envVariables;
+
+    // construct the argument list (unfortunately, the C api wasn't defined with C++ in mind, so
+    // we have to abuse const_cast) see: https://stackoverflow.com/a/190208
+    // this returns a null terminated vector that contains a list of non-const char ptrs
+    template<class Iter>
+    static std::vector<char*> toNullTerminatedCharIterable(Iter begin, Iter end) {
+        // TODO: insert test to check if our iterable store strings..?
+        // well it'll fail in the push_back stage anyway
+
+        std::vector<char*> charArrayPlex;
+
+        // the process name must be first for execv
+        //charArrayPlex.push_back(const_cast<char*>(input.c_str()));
+        for (auto it = begin; it != end; ++it) {
+            charArrayPlex.push_back(const_cast<char*>((*it).c_str()));
+        }
+        // must be terminated with a nullptr for execv
+        charArrayPlex.push_back(nullptr);
+
+        return charArrayPlex;
+    }
+
 public:
-    Process() = default;
+    template <class ArgIt, class EnvIt>
+    Process(const std::string& commandPath, ArgIt argBegin, ArgIt argEnd, EnvIt envBegin, EnvIt envEnd) : commandPath(commandPath) {
+        pid = 0;
+        pipe.initialize();
+            
+        // generate a vector that is able to be passed into exec for the process arguments
+        processArgs = toNullTerminatedCharIterable(argBegin, argEnd);
+        // process args must start with the processes name
+        processArgs.insert(processArgs.begin(), const_cast<char*>(commandPath.c_str()));
+
+        // ditto for the env variables
+        envVariables = toNullTerminatedCharIterable(envBegin, envEnd);
+        envVariables.insert(envVariables.begin(), const_cast<char*>(commandPath.c_str()));
+    }
 
     /**
      * Starts a seperate process with the provided command and
@@ -191,24 +234,8 @@ public:
      * @return TODO return errno returned by child call of execv
      * (need to use the TwoWayPipe)
      * */
-    template <class Iterable>
-    void start(const std::string& commandPath, Iterable& args) {
-        pid = 0;
-        pipe.initialize();
-        // construct the argument list (unfortunately,
-        // the C api wasn't defined with C++ in mind, so
-        // we have to abuse const_cast) see:
-        // https://stackoverflow.com/a/190208
-        std::vector<char*> cargs;
-        // the process name must be first for execv
-        cargs.push_back(const_cast<char*>(commandPath.c_str()));
-        for (const std::string& arg : args) {
-            cargs.push_back(const_cast<char*>(arg.c_str()));
-        }
-        // must be terminated with a nullptr for execv
-        cargs.push_back(nullptr);
-
-        pid = fork();
+    void start() {
+        this->pid = fork();
         // child
         if (pid == 0) {
             pipe.setAsChildEnd();
@@ -217,12 +244,9 @@ public:
             // in case the parent dies
             prctl(PR_SET_PDEATHSIG, SIGTERM);
 
-            execv(commandPath.c_str(), cargs.data());
-            // Nothing below this line
-            // should be executed by child
-            // process. If so, it means that
-            // the execl function wasn't
-            // successfull, so lets exit:
+            execvpe(commandPath.c_str(), processArgs.data(), envVariables.data());
+            // Nothing below this line should be executed by child process. If so, it means that
+            // the execl function wasn't successfull, so lets exit:
             exit(1);
         }
         pipe.setAsParentEnd();
@@ -256,123 +280,196 @@ public:
     }
 };
 
-/**
- * Execute a subprocess and optionally call a function per line of stdout.
- * @param commandPath   - the path of the executable to execute, e.g. "/bin/cat"
- * @param commandArgs   - the extra arguments for an executable e.g. {"argument 1", "henlo"}
- * @param stdinInput    - a list of inputs that will be piped into the processes' stdin
- * @param lambda        - a function that is called with every line from the executed process (default NOP function)
- * @param env           - a list of environment variables that the process will execute with (default nothing)
- */
-int execute(const std::string& commandPath, const std::vector<std::string>& commandArgs, const std::vector<std::string>& stdinInput, const std::function<void(std::string)>& lambda = [](std::string){}, const std::vector<std::string>& env = {});
-
-/**
- * Execute a subprocess and optionally call a function per line of stdout.
- * @param commandPath   - the path of the executable to execute, e.g. "/bin/cat"
- * @param commandArgs   - the extra arguments for an executable e.g. {"argument 1", "henlo"}
- * @param stdinBegin    - an InputIterator to provide stdin
- * @param stdinEnd      - the end of the InputIterator range for stdin
- * @param lambda        - a function that is called with every line from the executed process (default NOP function)
- * @param env           - a list of environment variables that the process will execute with (default nothing)
- */
-template<class InputIt>
-int execute(const std::string& commandPath, const std::vector<std::string>& commandArgs, InputIt stdinBegin, InputIt stdinEnd, const std::function<void(std::string)>& lambda = [](std::string){}, const std::vector<std::string>& env = {});
-
-/**
- * Execute a subprocess and retrieve the output of the command
- * @param commandPath   - the path of the executable to execute, e.g. "/bin/cat"
- * @param commandArgs   - the extra arguments for an executable e.g. {"argument 1", "henlo"}
- * @param stdinInput    - a list of inputs that will be piped into the processes' stdin
- * @param env           - a list of environment variables that the process will execute with (default nothing)
- */
-std::vector<std::string> check_output(const std::string& commandPath, const std::vector<std::string>& commandArgs, const std::vector<std::string>& stdioInput, const std::vector<std::string>& env = {});
-
-/**
- * Execute a subprocess and retrieve the output of the command
- * @param commandPath   - the path of the executable to execute, e.g. "/bin/cat"
- * @param commandArgs   - the extra arguments for an executable e.g. {"argument 1", "henlo"}
- * @param stdinBegin    - an InputIterator to provide stdin
- * @param stdinEnd      - the end of the InputIterator range for stdin
- * @param env           - a list of environment variables that the process will execute with (default nothing)
- */
-template<class InputIt>
-std::vector<std::string> check_output(const std::string& commandPath, const std::vector<std::string>& commandArgs, InputIt stdioBegin, InputIt stdioEnd, const std::vector<std::string>& env = {});
-
-// TODO: what if the process terminates? consider error handling potentials...
-class ProcessStream {
-    public:
-        ProcessStream(const std::string& commandPath, const std::vector<std::string>& commandArgs);
-
-        // write a line to the subprocess's stdin
-        void write(const std::string& inputLine);
-        // read a line and block until received (or until timeout reached)
-        template<typename Rep>
-        std::string read(std::chrono::duration<Rep> timeout=-1);
-        // if there is a line for reading
-        template<typename Rep>
-        bool ready(std::chrono::duration<Rep> timeout=0);
-
-        ProcessStream& operator<<(const std::string& inputLine);
-        ProcessStream& operator>>(std::string& outputLine);
+/* begin https://stackoverflow.com/a/16974087 */
+// a way to provide optional iterators to a function that do nothing
+struct DevNull {
+    template<typename T> T& operator=(T const&) { }
+    template<typename T> operator T&() { static T dummy; return dummy; }
 };
 
+struct DevNullIterator {
+    DevNull operator*() const { return DevNull();}
+    DevNullIterator& operator++() { return *this; }
+    DevNullIterator operator++(int) const { return *this; }
+    DevNullIterator* operator->() { return this; }
+    // always equivalent (a for loop should instantly terminate!)
+    bool operator==(DevNullIterator&) const { return true; }
+    bool operator!=(DevNullIterator&) const { return false; }
+};
+/* end https://stackoverflow.com/a/16974087 */
+
+/* hm, I copied this from somewhere, dunno where */
+template <typename T>
+struct is_iterator {
+    static char test(...);
+
+    template <typename U,
+             typename=typename std::iterator_traits<U>::difference_type,
+             typename=typename std::iterator_traits<U>::pointer,
+             typename=typename std::iterator_traits<U>::reference,
+             typename=typename std::iterator_traits<U>::value_type,
+             typename=typename std::iterator_traits<U>::iterator_category
+                 > static long test(U&&);
+
+    constexpr static bool value = std::is_same<decltype(test(std::declval<T>())),long>::value;
+};
+/* begin https://stackoverflow.com/a/29634934 */
+namespace detail
+{
+    // To allow ADL with custom begin/end
+    using std::begin;
+    using std::end;
+ 
+    template <typename T>
+    auto is_iterable_impl(int)
+    -> decltype (
+        begin(std::declval<T&>()) != end(std::declval<T&>()), // begin/end and operator !=
+        ++std::declval<decltype(begin(std::declval<T&>()))&>(), // operator ++
+        *begin(std::declval<T&>()), // operator*
+        std::true_type{});
+ 
+    template <typename T>
+    std::false_type is_iterable_impl(...);
+ 
+}
+ 
+template <typename T>
+using is_iterable = decltype(detail::is_iterable_impl<T>(0));
+/* end https://stackoverflow.com/a/29634934 */
+
+static std::list<std::string> dummyVec = {};
+
 /**
- * Execute a process, inputting stdin and calling the functor with the stdout
- * lines.
- * @param commandPath - an absolute string to the program path
- * @param commandArgs - a vector of arguments that will be passed to the process
- * @param stringInput - a feed of strings that feed into the process (you'll typically want to end them with a
- * newline)
- * @param lambda - the function to execute with every line output by the process
- * @return the exit status of the process
- * */
-int execute(const std::string& commandPath, const std::vector<std::string>& commandArgs,
-        std::list<std::string>& stringInput /* what pumps into stdin */,
-        std::function<void(std::string)> lambda) {
-    Process childProcess;
-    childProcess.start(commandPath, commandArgs);
+ * Execute a subprocess and optionally call a function per line of stdout.
+ * @param commandPath   - the path of the executable to execute, e.g. "/bin/cat"
+ * @param firstArg      - the begin iterator for a list of arguments
+ * @param lastArg       - the end iterator for a list of arguments
+ * @param stdinBegin    - an InputIterator to provide stdin
+ * @param stdinEnd      - the end of the InputIterator range for stdin
+ * @param lambda        - a function that is called with every line from the executed process (default NOP function)
+ * @param envBegin      - the begin of an iterator containing process environment variables to set
+ * @param envEnd        - the end of the env iterator
+ */
+template<class ArgIt, class StdinIt = std::list<std::string>::iterator, 
+         class EnvIt = std::list<std::string>::iterator, 
+         typename = typename std::enable_if<is_iterator<ArgIt>::value, void>::type,
+         typename = typename std::enable_if<is_iterator<StdinIt>::value, void>::type,
+         typename = typename std::enable_if<is_iterator<EnvIt>::value, void>::type>
+int execute(const std::string& commandPath, ArgIt firstArg, ArgIt lastArg, 
+            StdinIt stdinBegin = dummyVec.begin(), StdinIt stdinEnd = dummyVec.end(), 
+            const std::function<void(std::string)>& lambda = [](std::string){}, 
+            EnvIt envBegin = dummyVec.begin(), EnvIt envEnd = dummyVec.end()) {
 
-    // while our string queue is working,
-    while (!stringInput.empty()) {
-        // write our input to the process's stdin pipe
-        std::string newInput = stringInput.front();
-        stringInput.pop_front();
-        childProcess.write(newInput);
+    Process childProcess(commandPath, firstArg, lastArg, envBegin, envEnd);
+    childProcess.start();
+
+    // write our input to the processes stdin pipe
+    for (auto it = stdinBegin; it != stdinEnd; ++it) {
+        childProcess.write(*it);
     }
-
+    // close the stdin for the process
     childProcess.sendEOF();
 
-    // iterate over each line output by the child's stdout, and call
-    // the functor
-    std::string input;
-    while ((input = childProcess.readLine()).size() > 0) {
-        lambda(input);
+    // iterate over each line output by the child's stdout, and call the functor
+    std::string processOutput;
+    while ((processOutput = childProcess.readLine()).size() > 0) {
+        lambda(processOutput);
     }
 
     return childProcess.waitUntilFinished();
 }
 
-/* convenience fn to return a list of outputted strings */
-std::vector<std::string> checkOutput(const std::string& commandPath,
-        const std::vector<std::string>& commandArgs,
-        std::list<std::string>& stringInput /* what pumps into stdin */, int& status) {
+/**
+ * Execute a subprocess and optionally call a function per line of stdout.
+ * @param commandPath   - the path of the executable to execute, e.g. "/bin/cat"
+ * @param commandArgs   - the extra arguments for an executable e.g. {"argument 1", "henlo"} (default no arguments)
+ * @param stdinInput    - a list of inputs that will be piped into the processes' stdin (default no stdin)
+ * @param lambda        - a function that is called with every line from the executed process (default NOP function)
+ * @param env           - a list of environment variables that the process will execute with (default nothing)
+ */
+template<class ArgIterable = std::vector<std::string>, 
+         class StdinIterable = std::vector<std::string>, 
+         class EnvIterable = std::vector<std::string>,
+         typename = typename std::enable_if<is_iterable<ArgIterable>::value, void>::type,
+         typename = typename std::enable_if<is_iterable<StdinIterable>::value, void>::type,
+         typename = typename std::enable_if<is_iterable<EnvIterable>::value, void>::type>
+int execute(const std::string& commandPath, const ArgIterable& commandArgs = {}, 
+            const StdinIterable& stdinInput = {}, const std::function<void(std::string)>& lambda = [](std::string){}, 
+            const EnvIterable& env = {}) {
+    return execute(commandPath, commandArgs.begin(), commandArgs.end(), stdinInput.begin(), stdinInput.end(), lambda, env.begin(), env.end());
+}
+
+/**
+ * Execute a subprocess and retrieve the output of the command
+ * @param commandPath   - the path of the executable to execute, e.g. "/bin/cat"
+ * @param firstArg      - the begin iterator for a list of arguments
+ * @param lastArg       - the end iterator for a list of arguments
+ * @param stdinBegin    - an InputIterator to provide stdin
+ * @param stdinEnd      - the end of the InputIterator range for stdin
+ * @param lambda        - a function that is called with every line from the executed process (default NOP function)
+ * @param envBegin      - the begin of an iterator containing process environment variables to set
+ * @param envEnd        - the end of the env iterator
+ */
+template<class ArgIt, class StdinIt, class EnvIt, 
+        typename = typename std::enable_if<is_iterator<ArgIt>::value, void>::type,
+        typename = typename std::enable_if<is_iterator<StdinIt>::value, void>::type,
+        typename = typename std::enable_if<is_iterator<EnvIt>::value, void>::type>
+std::vector<std::string> check_output(const std::string& commandPath, ArgIt firstArg, ArgIt lastArg,
+                                      StdinIt stdinBegin = DevNullIterator(), StdinIt stdinEnd = DevNullIterator(), 
+                                      EnvIt envBegin = DevNullIterator(), EnvIt envEnd = DevNullIterator()) {
     std::vector<std::string> retVec;
-    status = execute(
-            commandPath, commandArgs, stringInput, [&](std::string s) { retVec.push_back(std::move(s)); });
+    //int status = execute(commandPath, firstArg, lastArg, stdinBegin, stdinEnd, [&](std::string s) { retVec.push_back(std::move(s)); }, envBegin, envEnd);
+    execute(commandPath, firstArg, lastArg, stdinBegin, stdinEnd, [&](std::string s) { retVec.push_back(std::move(s)); }, envBegin, envEnd);
     return retVec;
 }
 
-/* spawn the process in the background asynchronously, and return a future of the status code */
-std::future<int> async(const std::string commandPath, const std::vector<std::string> commandArgs,
-        std::list<std::string> stringInput, std::function<void(std::string)> lambda) {
-    // spawn the function async - we must pass the args by value into the async lambda
-    // otherwise they may destruct before the execute fn executes!
-    // whew, that was an annoying bug to find...
-    return std::async(std::launch::async,
-            [&](const std::string cp, const std::vector<std::string> ca, std::list<std::string> si,
-                    std::function<void(std::string)> l) { return execute(cp, ca, si, l); },
-            commandPath, commandArgs, stringInput, lambda);
+/**
+ * Execute a subprocess and retrieve the output of the command
+ * @param commandPath   - the path of the executable to execute, e.g. "/bin/cat"
+ * @param commandArgs   - the extra arguments for an executable e.g. {"argument 1", "henlo"}
+ * @param stdinInput    - a list of inputs that will be piped into the processes' stdin
+ * @param env           - a list of environment variables that the process will execute with (default nothing)
+ */
+template<class ArgIterable = std::vector<std::string>, 
+         class StdinIterable = std::vector<std::string>, 
+         class EnvIterable = std::vector<std::string>,
+         typename = typename std::enable_if<is_iterable<ArgIterable>::value, void>::type,
+         typename = typename std::enable_if<is_iterable<StdinIterable>::value, void>::type,
+         typename = typename std::enable_if<is_iterable<EnvIterable>::value, void>::type>
+std::vector<std::string> check_output(const std::string& commandPath, const ArgIterable& commandArgs = {}, 
+                                      const StdinIterable& stdinInput = {}, const EnvIterable& env = {}) {
+    return check_output(commandPath, commandArgs.begin(), commandArgs.end(), stdinInput.begin(), stdinInput.end(), env.begin(), env.end());
 }
+
+//// TODO: what if the process terminates? consider error handling potentials...
+//class ProcessStream {
+//    public:
+//        ProcessStream(const std::string& commandPath, const std::vector<std::string>& commandArgs);
+//
+//        // write a line to the subprocess's stdin
+//        void write(const std::string& inputLine);
+//        // read a line and block until received (or until timeout reached)
+//        template<typename Rep>
+//        std::string read(std::chrono::duration<Rep> timeout=-1);
+//        // if there is a line for reading
+//        template<typename Rep>
+//        bool ready(std::chrono::duration<Rep> timeout=0);
+//
+//        ProcessStream& operator<<(const std::string& inputLine);
+//        ProcessStream& operator>>(std::string& outputLine);
+//};
+
+/* spawn the process in the background asynchronously, and return a future of the status code */
+//std::future<int> async(const std::string commandPath, const std::vector<std::string> commandArgs,
+//        std::list<std::string> stringInput, std::function<void(std::string)> lambda) {
+//    // spawn the function async - we must pass the args by value into the async lambda
+//    // otherwise they may destruct before the execute fn executes!
+//    // whew, that was an annoying bug to find...
+//    return std::async(std::launch::async,
+//            [&](const std::string cp, const std::vector<std::string> ca, std::list<std::string> si,
+//                    std::function<void(std::string)> l) { return execute(cp, ca, si, l); },
+//            commandPath, commandArgs, stringInput, lambda);
+//}
 
 /* TODO: refactor up this function so that there isn't duplicated code - most of this is identical to the
  * execute fn execute a program and stream the output after each line input this function calls select to
@@ -380,81 +477,81 @@ std::future<int> async(const std::string commandPath, const std::vector<std::str
  * output, it may be not input into the functor until another line is fed in. You may modify the delay to try
  * and wait longer until moving on. This delay must exist, as several programs may not output a line for each
  * line input. Consider grep - it will not output a line if no match is made for that input. */
-class ProcessStream {
-    Process childProcess;
-
-public:
-    ProcessStream(const std::string& commandPath, const std::vector<std::string>& commandArgs,
-            std::list<std::string>& stringInput) {
-        childProcess.start(commandPath, commandArgs);
-
-        // while our string queue is working,
-        while (!stringInput.empty()) {
-            // write our input to the
-            // process's stdin pipe
-            std::string newInput = stringInput.front();
-            stringInput.pop_front();
-            childProcess.write(newInput);
-        }
-        // now we finished chucking in the string, send
-        // an EOF
-        childProcess.sendEOF();
-    }
-
-    ~ProcessStream() {
-        childProcess.waitUntilFinished();
-    }
-
-    struct iterator {
-        ProcessStream* ps;
-        bool isFinished = false;
-        // current read line of the process
-        std::string cline;
-
-        iterator(ProcessStream* ps) : ps(ps) {
-            // increment this ptr, because nothing exists initially
-            ++(*this);
-        }
-        // ctor for end()
-        iterator(ProcessStream* ps, bool) : ps(ps), isFinished(true) {}
-
-        const std::string& operator*() const {
-            return cline;
-        }
-
-        /* preincrement */
-        iterator& operator++() {
-            // iterate over each line output by the child's stdout, and call the functor
-            cline = ps->childProcess.readLine();
-            if (cline.empty()) {
-                isFinished = true;
-            }
-            return *this;
-        }
-
-        /* post increment */
-        iterator operator++(int) {
-            iterator old(*this);
-            ++(*this);
-            return old;
-        }
-
-        bool operator==(const iterator& other) const {
-            return other.ps == this->ps && this->isFinished == other.isFinished;
-        }
-
-        bool operator!=(const iterator& other) const {
-            return !((*this) == other);
-        }
-    };
-
-    iterator begin() {
-        return iterator(this);
-    }
-
-    iterator end() {
-        return iterator(this, true);
-    }
-};
+//class ProcessStream {
+//    Process childProcess;
+//
+//public:
+//    ProcessStream(const std::string& commandPath, const std::vector<std::string>& commandArgs,
+//            std::list<std::string>& stringInput) {
+//        childProcess.start(commandPath, commandArgs);
+//
+//        // while our string queue is working,
+//        while (!stringInput.empty()) {
+//            // write our input to the
+//            // process's stdin pipe
+//            std::string newInput = stringInput.front();
+//            stringInput.pop_front();
+//            childProcess.write(newInput);
+//        }
+//        // now we finished chucking in the string, send
+//        // an EOF
+//        childProcess.sendEOF();
+//    }
+//
+//    ~ProcessStream() {
+//        childProcess.waitUntilFinished();
+//    }
+//
+//    struct iterator {
+//        ProcessStream* ps;
+//        bool isFinished = false;
+//        // current read line of the process
+//        std::string cline;
+//
+//        iterator(ProcessStream* ps) : ps(ps) {
+//            // increment this ptr, because nothing exists initially
+//            ++(*this);
+//        }
+//        // ctor for end()
+//        iterator(ProcessStream* ps, bool) : ps(ps), isFinished(true) {}
+//
+//        const std::string& operator*() const {
+//            return cline;
+//        }
+//
+//        /* preincrement */
+//        iterator& operator++() {
+//            // iterate over each line output by the child's stdout, and call the functor
+//            cline = ps->childProcess.readLine();
+//            if (cline.empty()) {
+//                isFinished = true;
+//            }
+//            return *this;
+//        }
+//
+//        /* post increment */
+//        iterator operator++(int) {
+//            iterator old(*this);
+//            ++(*this);
+//            return old;
+//        }
+//
+//        bool operator==(const iterator& other) const {
+//            return other.ps == this->ps && this->isFinished == other.isFinished;
+//        }
+//
+//        bool operator!=(const iterator& other) const {
+//            return !((*this) == other);
+//        }
+//    };
+//
+//    iterator begin() {
+//        return iterator(this);
+//    }
+//
+//    iterator end() {
+//        return iterator(this, true);
+//    }
+//};
 
 }  // end namespace subprocess

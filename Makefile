@@ -1,7 +1,6 @@
 
 CXX=g++
-CXXFLAGS=-g -std=c++11
-# temporary for pnappa
+CXXFLAGS=-g -std=c++11 -Wall -pedantic
 LIBS=-lpthread
 
 .PHONY: all clean
