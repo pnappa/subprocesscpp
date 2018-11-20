@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <chrono>
 #include <functional>
 #include <future>
 #include <iostream>
@@ -175,15 +176,15 @@ public:
     }
 
     /**
-     * tests pipe state, returns short which represents the status
-     * if POLLIN bit is set then it can be read from, if POLLHUP bit is
+     * tests pipe state, returns short which represents the status.
+     * If POLLIN bit is set then it can be read from, if POLLHUP bit is
      * set then the write end has closed.
      * */
-    short inPipeState() {
+    short inPipeState(long wait_ms) {
         // file descriptor struct to check if pollin bit will be set
         struct pollfd fds = {.fd = input_pipe_file_descriptor[0], .events = POLLIN};
         // poll with no wait time
-        int res = poll(&fds, 1, 0);
+        int res = poll(&fds, 1, wait_ms);
 
         // if res < 0 then an error occurred with poll
         // POLLERR is set for some other errors
@@ -197,7 +198,7 @@ public:
         return fds.revents;
     }
 
-    bool canReadLine() {
+    bool canReadLine(long wait_ms) {
         if (!inStreamGood) {
             return false;
         }
@@ -210,7 +211,7 @@ public:
                 return true;
             }
             currentSearchPos = internalBuffer.size();
-            short pipeState = inPipeState();
+            short pipeState = inPipeState(wait_ms);
             if (!(pipeState & POLLIN)) {               // no bytes to read in pipe
                 if (pipeState & POLLHUP) {             // the write end has closed
                     if (internalBuffer.size() == 0) {  // and theres no bytes in the buffer
@@ -302,9 +303,30 @@ public:
         pipe.setAsParentEnd();
     }
 
-    std::string readLine() {
-        if (!pipe.isGood()) return "";
-        return pipe.readLine();
+    template <typename Rep = long>
+    bool isReady(std::chrono::duration<Rep> timeout = std::chrono::duration<long>(0)) {
+        if (timeout.count() < 0) {
+            return pipe.canReadLine(-1);
+        }
+        auto end = std::chrono::high_resolution_clock::now() + timeout;
+        auto ms_remaining = std::chrono::duration_cast<std::chrono::milliseconds>(timeout);
+        ;
+        do {
+            if (pipe.canReadLine(std::max(ms_remaining.count(), 0L))) {
+                return true;
+            }
+            ms_remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    end - std::chrono::high_resolution_clock::now());
+        } while (ms_remaining.count() > 0);
+        return false;
+    }
+
+    template <typename Rep = long>
+    std::string readLine(std::chrono::duration<Rep> timeout = std::chrono::duration<long>(-1)) {
+		if (isReady(timeout) && pipe.isGood()){
+			return pipe.readLine();
+		}
+        return "";   
     }
 
     size_t write(const std::string& input) {
