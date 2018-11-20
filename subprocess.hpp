@@ -323,7 +323,7 @@ public:
 
     template <typename Rep = long>
     std::string readLine(std::chrono::duration<Rep> timeout = std::chrono::duration<long>(-1)) {
-        if (isReady(timeout) && pipe.isGood()) {
+        if (isReady(timeout)) {
             return pipe.readLine();
         }
         return "";
