@@ -72,14 +72,17 @@ Unfortunately, I am not as familiar with Windows to write code for it, if you wa
 ### TODO: ....detail what each of the functions _should_ be used for.
 
 ```C++
-old API (current for now):
-int execute(const std::string& commandPath, const std::vector<std::string>& commandArgs, std::list<std::string>& stringInput, std::function<void(std::string)> lambda)
-std::vector<std::string> checkOutput(const std::string& commandPath, const std::vector<std::string>& commandArgs, std::list<std::string>& stringInput, int& status)
-std::future<int> async(const std::string commandPath, const std::vector<std::string> commandArgs, std::list<std::string> stringInput, std::function<void(std::string)> lambda)
+// Iterable can be stuff that can be iterated over (std::vector, etc.), all arguments other than commandPath are optional!
+int execute(const std::string& commandPath, const Iterable& commandArgs, const Iterable& stdinInput, std::function<void(std::string)> lambda, const Iterable& environmentVariables);
+// accepts iterators, the argument iterators are mandatory, the rest are optional
+int execute(const std::string& commandPath, Iterator argsBegin, Iterator argsEnd, Iterator stdinBegin, Iterator stdinEnd, std::function<void(std::string)> lambda, Iterator envStart, Iterator envEnd);
 
-// ctor for ProcessStream class
-class ProcessStream(const std::string& commandPath, const std::vector<std::string>& commandArgs, std::list<std::string>& stringInput)
+// Iterable can be stuff that can be iterated over (std::vector, etc.), all arguments other than commandPath are optional!
+std::vector<std::string> check_output(const std::string& commandPath, const Iterable& commandArgs, const Iterable& stdinInput, const Iterable& environmentVariables);
+// accepts iterators, the argument iterators are mandatory, the rest are optional
+std::vector<std::string> check_output(const std::string& commandPath, Iterator argsBegin, Iterator argsEnd, Iterator stdinBegin, Iterator stdinEnd, Iterator envStart, Iterator envEnd);
 
+// we currently don't have asynchronous, daemon spawning, or iterable interaction yet.  coming soon(TM)
 ```
 
 # License
@@ -88,8 +91,7 @@ This is dual-licensed under a MIT and GPLv3 license - so FOSS lovers can use it,
 I don't know too much about licenses, so if I missed anything, please let me know.
 
 # Future Features
-Some stuff that I haven't written yet, but I wanna:
- - [X] Output streaming. Provide an iterator to allow iteration over the output lines, such that we don't have to load all in memory at once.
- - [ ] Thread-safe async lambda interactions. Provide a method to launch a process in async, but still allow writing to the list of stdin without a race condition.
- - [ ] A ping-ponging interface. This should allow incrementally providing stdin, then invoking the functor if output is emitted. Note that will likely not be possible if there's not performed asynchronously, or without using select. Using select is a bit annoying, because how do we differentiate between a command taking a while and it providing no input?
- - [ ] Provide a way to set environment variables (i can pretty easily do it via using `execvpe`, but what should the API look like?) 
+Some stuff that I haven't written yet, but I wanna (see [this issue for a more in depth explanation of each](https://github.com/pnappa/subprocesscpp/issues/3)):
+ - Asynchronous execution
+ - Daemon spawning helpers (execute process and disown it, only need to consider where stdout should go).
+ - Interactive processes (manually feed stdin and retrieve stdout)

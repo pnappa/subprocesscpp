@@ -280,24 +280,6 @@ public:
     }
 };
 
-/* begin https://stackoverflow.com/a/16974087 */
-// a way to provide optional iterators to a function that do nothing
-struct DevNull {
-    template<typename T> T& operator=(T const&) { }
-    template<typename T> operator T&() { static T dummy; return dummy; }
-};
-
-struct DevNullIterator {
-    DevNull operator*() const { return DevNull();}
-    DevNullIterator& operator++() { return *this; }
-    DevNullIterator operator++(int) const { return *this; }
-    DevNullIterator* operator->() { return this; }
-    // always equivalent (a for loop should instantly terminate!)
-    bool operator==(DevNullIterator&) const { return true; }
-    bool operator!=(DevNullIterator&) const { return false; }
-};
-/* end https://stackoverflow.com/a/16974087 */
-
 /* hm, I copied this from somewhere, dunno where */
 template <typename T>
 struct is_iterator {
@@ -337,7 +319,9 @@ template <typename T>
 using is_iterable = decltype(detail::is_iterable_impl<T>(0));
 /* end https://stackoverflow.com/a/29634934 */
 
-static std::list<std::string> dummyVec = {};
+// smallest possible iterable for the default arg values for the API functions that accept iterators
+using DummyContainer = std::list<std::string>;
+static DummyContainer dummyVec = {};
 
 /**
  * Execute a subprocess and optionally call a function per line of stdout.
@@ -350,8 +334,8 @@ static std::list<std::string> dummyVec = {};
  * @param envBegin      - the begin of an iterator containing process environment variables to set
  * @param envEnd        - the end of the env iterator
  */
-template<class ArgIt, class StdinIt = std::list<std::string>::iterator, 
-         class EnvIt = std::list<std::string>::iterator, 
+template<class ArgIt, class StdinIt = DummyContainer::iterator,
+         class EnvIt = DummyContainer::iterator,
          typename = typename std::enable_if<is_iterator<ArgIt>::value, void>::type,
          typename = typename std::enable_if<is_iterator<StdinIt>::value, void>::type,
          typename = typename std::enable_if<is_iterator<EnvIt>::value, void>::type>
@@ -410,13 +394,14 @@ int execute(const std::string& commandPath, const ArgIterable& commandArgs = {},
  * @param envBegin      - the begin of an iterator containing process environment variables to set
  * @param envEnd        - the end of the env iterator
  */
-template<class ArgIt, class StdinIt, class EnvIt, 
-        typename = typename std::enable_if<is_iterator<ArgIt>::value, void>::type,
-        typename = typename std::enable_if<is_iterator<StdinIt>::value, void>::type,
-        typename = typename std::enable_if<is_iterator<EnvIt>::value, void>::type>
+template<class ArgIt, class StdinIt = DummyContainer::iterator,
+         class EnvIt = DummyContainer::iterator,
+         typename = typename std::enable_if<is_iterator<ArgIt>::value, void>::type,
+         typename = typename std::enable_if<is_iterator<StdinIt>::value, void>::type,
+         typename = typename std::enable_if<is_iterator<EnvIt>::value, void>::type>
 std::vector<std::string> check_output(const std::string& commandPath, ArgIt firstArg, ArgIt lastArg,
-                                      StdinIt stdinBegin = DevNullIterator(), StdinIt stdinEnd = DevNullIterator(), 
-                                      EnvIt envBegin = DevNullIterator(), EnvIt envEnd = DevNullIterator()) {
+                                      StdinIt stdinBegin = dummyVec.begin(), StdinIt stdinEnd = dummyVec.end(),
+                                      EnvIt envBegin = dummyVec.begin(), EnvIt envEnd = dummyVec.end()) {
     std::vector<std::string> retVec;
     //int status = execute(commandPath, firstArg, lastArg, stdinBegin, stdinEnd, [&](std::string s) { retVec.push_back(std::move(s)); }, envBegin, envEnd);
     execute(commandPath, firstArg, lastArg, stdinBegin, stdinEnd, [&](std::string s) { retVec.push_back(std::move(s)); }, envBegin, envEnd);

@@ -19,6 +19,34 @@ TEST_CASE("[iterable] basic echo execution", "[subprocess::execute]") {
     REQUIRE(outputs.front() == "hello\n");
 }
 
+TEST_CASE("[iterable] basic echo execution varargs", "[subprocess::execute]") {
+    // test that execute will compile file with vargs
+    std::list<std::string> inputs;
+    std::vector<std::string> outputs;
+    std::vector<std::string> env = {"lol=lol"};
+    subprocess::execute("/bin/echo", {"hello"}, inputs, [&](std::string s) { outputs.push_back(s); }, env);
+    REQUIRE(outputs.size() == 1);
+    // echo appends a newline by default
+    REQUIRE(outputs.front() == "hello\n");
+
+    int status = subprocess::execute("/bin/echo", {"hello"}, inputs, [&](std::string s) { outputs.push_back(s); });
+    outputs.clear();
+    REQUIRE(outputs.size() == 1);
+    REQUIRE(status == 0);
+
+    outputs.clear();
+    status = subprocess::execute("/bin/echo", {"hello"}, inputs);
+    REQUIRE(status == 0);
+
+    outputs.clear();
+    status = subprocess::execute("/bin/echo", {"hello"});
+    REQUIRE(status == 0);
+
+    outputs.clear();
+    status = subprocess::execute("/bin/echo");
+    REQUIRE(status == 0);
+}
+
 TEST_CASE("[iterable] no trailing output newline echo execution", "[subprocess::execute]") {
     std::list<std::string> inputs;
     std::vector<std::string> outputs;
@@ -61,6 +89,16 @@ TEST_CASE("[iterable] stdin execute simple cat no trailing newline for last inpu
     REQUIRE(outputs.size() == 2);
     REQUIRE(outputs.at(0) == "henlo wurld\n");
     REQUIRE(outputs.at(1) == "1,2,3,4");
+}
+
+TEST_CASE("[iterable] test env variables are sent to program correctly", "[subprocess::execute]") {
+    // executing a command with the last one missing a newline still should work the same, as the stdin stream gets closed.
+    std::vector<std::string> outputs;
+    int retval = subprocess::execute("./test_programs/print_env", {}, {}, [&](std::string s) { outputs.push_back(s); }, {"LOL=lol"});
+
+    REQUIRE(retval == 0);
+    REQUIRE(outputs.size() == 1);
+    REQUIRE(outputs.at(0) == "LOL,lol\n");
 }
 
 TEST_CASE("[iterator] basic echo execution", "[subprocess::execute]") {
@@ -106,9 +144,10 @@ TEST_CASE("[iterator] no trailing output newline echo execution", "[subprocess::
 
 TEST_CASE("[iterator] non existent executable", "[subprocess::execute]") {
     // try and run a non-existent executable, what should happen..?
+    std::list<std::string> args;
     std::list<std::string> inputs;
     std::vector<std::string> outputs;
-    int retval = subprocess::execute("/bin/wangwang", {}, inputs,
+    int retval = subprocess::execute("/bin/wangwang", args.begin(), args.end(), inputs.begin(), inputs.end(),
             [](std::string) { FAIL("this functor should never have been called"); });
 
     // process should have failed..?
@@ -117,9 +156,10 @@ TEST_CASE("[iterator] non existent executable", "[subprocess::execute]") {
 }
 
 TEST_CASE("[iterator] stdin execute simple cat", "[subprocess::execute]") {
+    std::list<std::string> args;
     std::list<std::string> inputs = {"henlo wurld\n", "1,2,3,4\n"};
     std::vector<std::string> outputs;
-    int retval = subprocess::execute("/bin/cat", {}, inputs, [&](std::string s) { outputs.push_back(s); });
+    int retval = subprocess::execute("/bin/cat", args.begin(), args.end(), inputs.begin(), inputs.end(), [&](std::string s) { outputs.push_back(s); });
 
     REQUIRE(retval == 0);
     REQUIRE(outputs.size() == 2);
@@ -129,15 +169,20 @@ TEST_CASE("[iterator] stdin execute simple cat", "[subprocess::execute]") {
 
 TEST_CASE("[iterator] stdin execute simple cat no trailing newline for last input", "[subprocess::execute]") {
     // executing a command with the last one missing a newline still should work the same, as the stdin stream gets closed.
+    std::list<std::string> args;
     std::list<std::string> inputs = {"henlo wurld\n", "1,2,3,4"};
     std::vector<std::string> outputs;
-    int retval = subprocess::execute("/bin/cat", {}, inputs, [&](std::string s) { outputs.push_back(s); });
+    int retval = subprocess::execute("/bin/cat", args.begin(), args.end(), inputs.begin(), inputs.end(), [&](std::string s) { outputs.push_back(s); });
 
     REQUIRE(retval == 0);
     REQUIRE(outputs.size() == 2);
     REQUIRE(outputs.at(0) == "henlo wurld\n");
     REQUIRE(outputs.at(1) == "1,2,3,4");
 }
+
+
+
+
 
 
 TEST_CASE("checkOutput simple case cat", "[subprocess::checkOutput]") {

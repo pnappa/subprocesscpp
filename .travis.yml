@@ -20,7 +20,7 @@ jobs:
         - stage: UnitTests
           os: linux
           sudo: false
-          script: make && make test
+          script: make && make check 
           addons:
               apt:
                   packages:
