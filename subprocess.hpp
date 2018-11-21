@@ -20,7 +20,7 @@
 #include <unistd.h>
 
 namespace subprocess {
-
+namespace internal {
 /**
  * A TwoWayPipe that allows reading and writing between two processes
  * must call initialize before being passed between processes or used
@@ -105,10 +105,10 @@ public:
         if (initialized) {
             return;
         }
-		bool failed = pipe(input_pipe_file_descriptor) < 0;
-		failed |= pipe(output_pipe_file_descriptor) < 0;
-		if (failed)
-		{
+        bool failed = pipe(input_pipe_file_descriptor) < 0;
+        failed |= pipe(output_pipe_file_descriptor) < 0;
+        if (failed)
+        {
             // error occurred, check errno and throw relevant exception
         } else {
             initialized = true;
@@ -342,7 +342,7 @@ public:
         return status;
     }
 };
-
+}
 /**
  * Execute a subprocess and optionally call a function per line of stdout.
  * @param commandPath   - the path of the executable to execute, e.g. "/bin/cat"
@@ -425,7 +425,7 @@ std::vector<std::string> check_output(const std::string& commandPath,
 int execute(const std::string& commandPath, const std::vector<std::string>& commandArgs,
         std::list<std::string>& stringInput /* what pumps into stdin */,
         std::function<void(std::string)> lambda) {
-    Process childProcess;
+    internal::Process childProcess;
     childProcess.start(commandPath, commandArgs.begin(), commandArgs.end());
 
     // while our string queue is working,
@@ -477,7 +477,7 @@ std::future<int> async(const std::string commandPath, const std::vector<std::str
  * and wait longer until moving on. This delay must exist, as several programs may not output a line for each
  * line input. Consider grep - it will not output a line if no match is made for that input. */
 class ProcessStream {
-    Process childProcess;
+    internal::Process childProcess;
 
 public:
     ProcessStream(const std::string& commandPath, const std::vector<std::string>& commandArgs,
