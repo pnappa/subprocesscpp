@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <chrono>
 #include <functional>
 #include <future>
 #include <iostream>
@@ -15,13 +16,14 @@
 
 // unix process stuff
 #include <cstring>
+#include <poll.h>
 #include <signal.h>
 #include <sys/prctl.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 namespace subprocess {
-
+namespace internal {
 /**
  * A TwoWayPipe that allows reading and writing between two processes
  * must call initialize before being passed between processes or used
@@ -35,7 +37,8 @@ private:
     std::string internalBuffer;
     bool inStreamGood = true;
     bool endSelected = false;
-
+    bool initialized = false;
+    size_t currentSearchPos = 0;
     /**
      * closes the ends that aren't used (do we need to do this?
      * */
@@ -46,6 +49,54 @@ private:
         close(output_pipe_file_descriptor[0]);
     }
 
+    /**
+     * reads up to n bytes into the internal buffer
+     * @param n - the max number of bytes to read in
+     * @return the number of bytes read in, -1 in the case of an
+     * error
+     * */
+    ssize_t readToInternalBuffer() {
+        char buf[256];
+        ssize_t bytesCounted = -1;
+
+        while ((bytesCounted = read(input_pipe_file_descriptor[0], buf, 256)) <= 0) {
+            if (bytesCounted < 0) {
+                if (errno != EINTR) { /* interrupted by sig handler return */
+                    inStreamGood = false;
+                    return -1;
+                }
+            } else if (bytesCounted == 0) { /* EOF */
+                return 0;
+            }
+        }
+
+        internalBuffer.append(buf, bytesCounted);
+        return bytesCounted;
+    }
+
+    /**
+     * tests pipe state, returns short which represents the status.
+     * If POLLIN bit is set then it can be read from, if POLLHUP bit is
+     * set then the write end has closed.
+     * */
+    short inPipeState(long wait_ms) {
+        // file descriptor struct to check if pollin bit will be set
+        struct pollfd fds = {.fd = input_pipe_file_descriptor[0], .events = POLLIN};
+        // poll with no wait time
+        int res = poll(&fds, 1, wait_ms);
+
+        // if res < 0 then an error occurred with poll
+        // POLLERR is set for some other errors
+        // POLLNVAL is set if the pipe is closed
+        if (res < 0 || fds.revents & (POLLERR | POLLNVAL)) {
+            // TODO
+            // an error occurred, check errno then throw exception if it is critical
+        }
+        // check if there is either data in the pipe or the other end is closed
+        //(in which case a call will not block, it will simply return 0 bytes)
+        return fds.revents;
+    }
+
 public:
     TwoWayPipe() = default;
 
@@ -54,8 +105,17 @@ public:
      * this is called
      * */
     void initialize() {
-        pipe(input_pipe_file_descriptor);
-        pipe(output_pipe_file_descriptor);
+        if (initialized) {
+            return;
+        }
+        bool failed = pipe(input_pipe_file_descriptor) < 0;
+        failed |= pipe(output_pipe_file_descriptor) < 0;
+        if (failed)
+        {
+            // error occurred, check errno and throw relevant exception
+        } else {
+            initialized = true;
+        }
     }
 
     /**
@@ -109,48 +169,24 @@ public:
     }
 
     /**
-     * reads up to n bytes into the internal buffer
-     * @param n - the max number of bytes to read in
-     * @return the number of bytes read in, -1 in the case of an
-     * error
-     * */
-    ssize_t readToInternalBuffer() {
-        char buf[256];
-        ssize_t bytesCounted = -1;
-
-        while ((bytesCounted = read(input_pipe_file_descriptor[0], buf, 256)) <= 0) {
-            if (bytesCounted < 0) {
-                if (errno != EINTR) { /* interrupted by sig handler return */
-                    inStreamGood = false;
-                    return -1;
-                }
-            } else if (bytesCounted == 0) { /* EOF */
-                inStreamGood = false;
-                return 0;
-            }
-        }
-
-        internalBuffer.append(buf, bytesCounted);
-        return bytesCounted;
-    }
-
-    /**
-     * read line from the pipe - Not threadsafe
-     * blocks until either a newline is read or the other end of the
-     * pipe is closed
+     * Read line from the pipe - Not threadsafe
+     * Blocks until either a newline is read
+     *  or the other end of the pipe is closed
      * @return the string read from the pipe or the empty string if
      * there was not a line to read.
      * */
     std::string readLine() {
         size_t firstNewLine;
-        size_t currentSearchPos = 0;
+
         while ((firstNewLine = internalBuffer.find_first_of('\n', currentSearchPos)) == std::string::npos) {
+            currentSearchPos = internalBuffer.size();
             ssize_t bytesRead = readToInternalBuffer();
             if (bytesRead < 0) {
                 std::cerr << "errno " << errno << " occurred" << std::endl;
                 return "";
             }
-            if (bytesRead == 0) {
+            if (bytesRead == 0) {  // an EOF was reached, return the final line
+                inStreamGood = false;
                 return internalBuffer;
             }
         }
@@ -160,10 +196,47 @@ public:
 
         internalBuffer.erase(firstNewLine + 1);
         internalBuffer.swap(endOfInternalBuffer);
-
+        currentSearchPos = 0;
         // now contains the first characters up to and
         // including the newline character
         return endOfInternalBuffer;
+    }
+
+    bool canReadLine(long wait_ms) {
+        if (!inStreamGood) {
+            return false;
+        }
+        while (true) {
+            size_t firstNewLine = internalBuffer.find_first_of('\n', currentSearchPos);
+            if (firstNewLine != std::string::npos) {
+                // this means that the next call to readLine won't
+                // have to search through the whole string again
+                currentSearchPos = firstNewLine;
+                return true;
+            }
+            currentSearchPos = internalBuffer.size();
+            short pipeState = inPipeState(wait_ms);
+            if (!(pipeState & POLLIN)) {               // no bytes to read in pipe
+                if (pipeState & POLLHUP) {             // the write end has closed
+                    if (internalBuffer.size() == 0) {  // and theres no bytes in the buffer
+                                                       // this pipe is done
+                        inStreamGood = false;
+                        return false;
+                    }
+                    // the buffer can be read as the final string
+                    return true;
+                }
+                // pipe is still good, it just hasn't got anything in it
+                return false;
+            }
+
+            ssize_t bytesRead = readToInternalBuffer();
+
+            if (bytesRead < 0) {
+                // error check errno and throw exception
+                return false;  // for now just return false
+            }
+        }
     }
 
     void closeOutput() {
@@ -224,16 +297,12 @@ public:
     }
 
     /**
-     * Starts a seperate process with the provided command and
-     * arguments This also initializes the TwoWayPipe
-     * @param commandPath - an absolute string to the program path
-     * @param commandArgs - an iterable container of strings that
-     * will be passed as arguments
+     * Starts a seperate process with the provided command and arguments 
      * @return TODO return errno returned by child call of execv
      * (need to use the TwoWayPipe)
      * */
     void start() {
-        this->pid = fork();
+        pid = fork();
         // child
         if (pid == 0) {
             pipe.setAsChildEnd();
@@ -250,9 +319,20 @@ public:
         pipe.setAsParentEnd();
     }
 
-    std::string readLine() {
-        if (!pipe.isGood()) return "";
-        return pipe.readLine();
+    template <typename Rep = long>
+    bool isReady(std::chrono::duration<Rep> timeout = std::chrono::duration<long>(0)) {
+        if (timeout.count() < 0) {
+            return pipe.canReadLine(-1);
+        }
+        return pipe.canReadLine(std::chrono::duration_cast<std::chrono::milliseconds>(timeout).count());
+    }
+
+    template <typename Rep = long>
+    std::string readLine(std::chrono::duration<Rep> timeout = std::chrono::duration<long>(-1)) {
+        if (isReady(timeout)) {
+            return pipe.readLine();
+        }
+        return "";
     }
 
     size_t write(const std::string& input) {
@@ -317,6 +397,7 @@ using is_iterable = decltype(detail::is_iterable_impl<T>(0));
 // smallest possible iterable for the default arg values for the API functions that accept iterators
 using DummyContainer = std::list<std::string>;
 static DummyContainer dummyVec = {};
+} // namespace internal
 
 /**
  * Execute a subprocess and optionally call a function per line of stdout.
@@ -330,15 +411,15 @@ static DummyContainer dummyVec = {};
  * @param envBegin      - the begin of an iterator containing process environment variables to set
  * @param envEnd        - the end of the env iterator
  */
-template <class ArgIt, class StdinIt = DummyContainer::iterator, class EnvIt = DummyContainer::iterator,
-        typename = typename std::enable_if<is_iterator<ArgIt>::value, void>::type,
-        typename = typename std::enable_if<is_iterator<StdinIt>::value, void>::type,
-        typename = typename std::enable_if<is_iterator<EnvIt>::value, void>::type>
+template <class ArgIt, class StdinIt = internal::DummyContainer::iterator, class EnvIt = internal::DummyContainer::iterator,
+        typename = typename std::enable_if<internal::is_iterator<ArgIt>::value, void>::type,
+        typename = typename std::enable_if<internal::is_iterator<StdinIt>::value, void>::type,
+        typename = typename std::enable_if<internal::is_iterator<EnvIt>::value, void>::type>
 int execute(const std::string& commandPath, ArgIt firstArg, ArgIt lastArg,
-        StdinIt stdinBegin = dummyVec.begin(), StdinIt stdinEnd = dummyVec.end(),
+        StdinIt stdinBegin = internal::dummyVec.begin(), StdinIt stdinEnd = internal::dummyVec.end(),
         const std::function<void(std::string)>& lambda = [](std::string) {},
-        EnvIt envBegin = dummyVec.begin(), EnvIt envEnd = dummyVec.end()) {
-    Process childProcess(commandPath, firstArg, lastArg, envBegin, envEnd);
+        EnvIt envBegin = internal::dummyVec.begin(), EnvIt envEnd = internal::dummyVec.end()) {
+    internal::Process childProcess(commandPath, firstArg, lastArg, envBegin, envEnd);
     childProcess.start();
 
     // write our input to the processes stdin pipe
@@ -369,9 +450,9 @@ int execute(const std::string& commandPath, ArgIt firstArg, ArgIt lastArg,
  */
 template <class ArgIterable = std::list<std::string>, class StdinIterable = std::list<std::string>,
         class EnvIterable = std::list<std::string>,
-        typename = typename std::enable_if<is_iterable<ArgIterable>::value, void>::type,
-        typename = typename std::enable_if<is_iterable<StdinIterable>::value, void>::type,
-        typename = typename std::enable_if<is_iterable<EnvIterable>::value, void>::type>
+        typename = typename std::enable_if<internal::is_iterable<ArgIterable>::value, void>::type,
+        typename = typename std::enable_if<internal::is_iterable<StdinIterable>::value, void>::type,
+        typename = typename std::enable_if<internal::is_iterable<EnvIterable>::value, void>::type>
 int execute(const std::string& commandPath, const ArgIterable& commandArgs = {},
         const StdinIterable& stdinInput = {},
         const std::function<void(std::string)>& lambda = [](std::string) {}, const EnvIterable& env = {}) {
@@ -391,13 +472,13 @@ int execute(const std::string& commandPath, const ArgIterable& commandArgs = {},
  * @param envBegin      - the begin of an iterator containing process environment variables to set
  * @param envEnd        - the end of the env iterator
  */
-template <class ArgIt, class StdinIt = DummyContainer::iterator, class EnvIt = DummyContainer::iterator,
-        typename = typename std::enable_if<is_iterator<ArgIt>::value, void>::type,
-        typename = typename std::enable_if<is_iterator<StdinIt>::value, void>::type,
-        typename = typename std::enable_if<is_iterator<EnvIt>::value, void>::type>
+template <class ArgIt, class StdinIt = internal::DummyContainer::iterator, class EnvIt = internal::DummyContainer::iterator,
+        typename = typename std::enable_if<internal::is_iterator<ArgIt>::value, void>::type,
+        typename = typename std::enable_if<internal::is_iterator<StdinIt>::value, void>::type,
+        typename = typename std::enable_if<internal::is_iterator<EnvIt>::value, void>::type>
 std::vector<std::string> check_output(const std::string& commandPath, ArgIt firstArg, ArgIt lastArg,
-        StdinIt stdinBegin = dummyVec.begin(), StdinIt stdinEnd = dummyVec.end(),
-        EnvIt envBegin = dummyVec.begin(), EnvIt envEnd = dummyVec.end()) {
+        StdinIt stdinBegin = internal::dummyVec.begin(), StdinIt stdinEnd = internal::dummyVec.end(),
+        EnvIt envBegin = internal::dummyVec.begin(), EnvIt envEnd = internal::dummyVec.end()) {
     std::vector<std::string> retVec;
     // int status = execute(commandPath, firstArg, lastArg, stdinBegin, stdinEnd, [&](std::string s) {
     // retVec.push_back(std::move(s)); }, envBegin, envEnd);
@@ -415,9 +496,9 @@ std::vector<std::string> check_output(const std::string& commandPath, ArgIt firs
  */
 template <class ArgIterable = std::vector<std::string>, class StdinIterable = std::vector<std::string>,
         class EnvIterable = std::vector<std::string>,
-        typename = typename std::enable_if<is_iterable<ArgIterable>::value, void>::type,
-        typename = typename std::enable_if<is_iterable<StdinIterable>::value, void>::type,
-        typename = typename std::enable_if<is_iterable<EnvIterable>::value, void>::type>
+        typename = typename std::enable_if<internal::is_iterable<ArgIterable>::value, void>::type,
+        typename = typename std::enable_if<internal::is_iterable<StdinIterable>::value, void>::type,
+        typename = typename std::enable_if<internal::is_iterable<EnvIterable>::value, void>::type>
 std::vector<std::string> check_output(const std::string& commandPath, const ArgIterable& commandArgs = {},
         const StdinIterable& stdinInput = {}, const EnvIterable& env = {}) {
     return check_output(commandPath, commandArgs.begin(), commandArgs.end(), stdinInput.begin(),

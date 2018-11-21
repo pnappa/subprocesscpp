@@ -1,6 +1,6 @@
 # SubprocessCPP
 
-![travis build](https://img.shields.io/travis/pnappa/subprocesscpp.svg) ![codecov coverage](https://img.shields.io/codecov/c/github/pnappa/subprocesscpp.svg) ![nice](https://img.shields.io/badge/legit-this%20makes%20the%20project%20look%20better-brightgreen.svg)
+[![travis build](https://img.shields.io/travis/pnappa/subprocesscpp/master.svg)](https://img.shields.io/travis/pnappa/subprocesscpp/master.svg) ![codecov coverage](https://img.shields.io/codecov/c/github/pnappa/subprocesscpp.svg) ![nice](https://img.shields.io/badge/legit-this%20makes%20the%20project%20look%20better-brightgreen.svg)
 
 A neat header-only library that allows you to execute processes either synchronously or asynchronously, whilst providing input and handling the generated input. No more calling `exec` in a C++ program!
 
