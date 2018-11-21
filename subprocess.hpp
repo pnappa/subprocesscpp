@@ -9,11 +9,9 @@
 #include <stdexcept>
 #include <string>
 #include <tuple>
-#include <vector>
 #include <type_traits>
-#include <iterator>
-#include <vector>
 #include <utility>
+#include <vector>
 
 // unix process stuff
 #include <cstring>
@@ -191,7 +189,7 @@ class Process {
     // construct the argument list (unfortunately, the C api wasn't defined with C++ in mind, so
     // we have to abuse const_cast) see: https://stackoverflow.com/a/190208
     // this returns a null terminated vector that contains a list of non-const char ptrs
-    template<class Iter>
+    template <class Iter>
     static std::vector<char*> toNullTerminatedCharIterable(Iter begin, Iter end) {
         // TODO: insert test to check if our iterable store strings..?
         // well it'll fail in the push_back stage anyway
@@ -199,7 +197,7 @@ class Process {
         std::vector<char*> charArrayPlex;
 
         // the process name must be first for execv
-        //charArrayPlex.push_back(const_cast<char*>(input.c_str()));
+        // charArrayPlex.push_back(const_cast<char*>(input.c_str()));
         for (auto it = begin; it != end; ++it) {
             charArrayPlex.push_back(const_cast<char*>((*it).c_str()));
         }
@@ -211,10 +209,11 @@ class Process {
 
 public:
     template <class ArgIt, class EnvIt>
-    Process(const std::string& commandPath, ArgIt argBegin, ArgIt argEnd, EnvIt envBegin, EnvIt envEnd) : commandPath(commandPath) {
+    Process(const std::string& commandPath, ArgIt argBegin, ArgIt argEnd, EnvIt envBegin, EnvIt envEnd)
+            : commandPath(commandPath) {
         pid = 0;
         pipe.initialize();
-            
+
         // generate a vector that is able to be passed into exec for the process arguments
         processArgs = toNullTerminatedCharIterable(argBegin, argEnd);
         // process args must start with the processes name
@@ -222,7 +221,6 @@ public:
 
         // ditto for the env variables
         envVariables = toNullTerminatedCharIterable(envBegin, envEnd);
-        envVariables.insert(envVariables.begin(), const_cast<char*>(commandPath.c_str()));
     }
 
     /**
@@ -240,13 +238,13 @@ public:
         if (pid == 0) {
             pipe.setAsChildEnd();
 
-            // ask kernel to deliver SIGTERM
-            // in case the parent dies
+            // ask kernel to deliver SIGTERM in case the parent dies
+            // so we don't get zombies
             prctl(PR_SET_PDEATHSIG, SIGTERM);
 
             execvpe(commandPath.c_str(), processArgs.data(), envVariables.data());
             // Nothing below this line should be executed by child process. If so, it means that
-            // the execl function wasn't successfull, so lets exit:
+            // the exec function wasn't successful, so lets exit:
             exit(1);
         }
         pipe.setAsParentEnd();
@@ -285,36 +283,33 @@ template <typename T>
 struct is_iterator {
     static char test(...);
 
-    template <typename U,
-             typename=typename std::iterator_traits<U>::difference_type,
-             typename=typename std::iterator_traits<U>::pointer,
-             typename=typename std::iterator_traits<U>::reference,
-             typename=typename std::iterator_traits<U>::value_type,
-             typename=typename std::iterator_traits<U>::iterator_category
-                 > static long test(U&&);
+    template <typename U, typename = typename std::iterator_traits<U>::difference_type,
+            typename = typename std::iterator_traits<U>::pointer,
+            typename = typename std::iterator_traits<U>::reference,
+            typename = typename std::iterator_traits<U>::value_type,
+            typename = typename std::iterator_traits<U>::iterator_category>
+    static long test(U&&);
 
-    constexpr static bool value = std::is_same<decltype(test(std::declval<T>())),long>::value;
+    constexpr static bool value = std::is_same<decltype(test(std::declval<T>())), long>::value;
 };
 /* begin https://stackoverflow.com/a/29634934 */
-namespace detail
-{
-    // To allow ADL with custom begin/end
-    using std::begin;
-    using std::end;
- 
-    template <typename T>
-    auto is_iterable_impl(int)
-    -> decltype (
-        begin(std::declval<T&>()) != end(std::declval<T&>()), // begin/end and operator !=
-        ++std::declval<decltype(begin(std::declval<T&>()))&>(), // operator ++
-        *begin(std::declval<T&>()), // operator*
-        std::true_type{});
- 
-    template <typename T>
-    std::false_type is_iterable_impl(...);
- 
-}
- 
+namespace detail {
+// To allow ADL with custom begin/end
+using std::begin;
+using std::end;
+
+template <typename T>
+auto is_iterable_impl(int)
+        -> decltype(begin(std::declval<T&>()) != end(std::declval<T&>()),  // begin/end and operator !=
+                ++std::declval<decltype(begin(std::declval<T&>()))&>(),    // operator ++
+                *begin(std::declval<T&>()),                                // operator*
+                std::true_type{});
+
+template <typename T>
+std::false_type is_iterable_impl(...);
+
+}  // namespace detail
+
 template <typename T>
 using is_iterable = decltype(detail::is_iterable_impl<T>(0));
 /* end https://stackoverflow.com/a/29634934 */
@@ -330,20 +325,19 @@ static DummyContainer dummyVec = {};
  * @param lastArg       - the end iterator for a list of arguments
  * @param stdinBegin    - an InputIterator to provide stdin
  * @param stdinEnd      - the end of the InputIterator range for stdin
- * @param lambda        - a function that is called with every line from the executed process (default NOP function)
+ * @param lambda        - a function that is called with every line from the executed process (default NOP
+ * function)
  * @param envBegin      - the begin of an iterator containing process environment variables to set
  * @param envEnd        - the end of the env iterator
  */
-template<class ArgIt, class StdinIt = DummyContainer::iterator,
-         class EnvIt = DummyContainer::iterator,
-         typename = typename std::enable_if<is_iterator<ArgIt>::value, void>::type,
-         typename = typename std::enable_if<is_iterator<StdinIt>::value, void>::type,
-         typename = typename std::enable_if<is_iterator<EnvIt>::value, void>::type>
-int execute(const std::string& commandPath, ArgIt firstArg, ArgIt lastArg, 
-            StdinIt stdinBegin = dummyVec.begin(), StdinIt stdinEnd = dummyVec.end(), 
-            const std::function<void(std::string)>& lambda = [](std::string){}, 
-            EnvIt envBegin = dummyVec.begin(), EnvIt envEnd = dummyVec.end()) {
-
+template <class ArgIt, class StdinIt = DummyContainer::iterator, class EnvIt = DummyContainer::iterator,
+        typename = typename std::enable_if<is_iterator<ArgIt>::value, void>::type,
+        typename = typename std::enable_if<is_iterator<StdinIt>::value, void>::type,
+        typename = typename std::enable_if<is_iterator<EnvIt>::value, void>::type>
+int execute(const std::string& commandPath, ArgIt firstArg, ArgIt lastArg,
+        StdinIt stdinBegin = dummyVec.begin(), StdinIt stdinEnd = dummyVec.end(),
+        const std::function<void(std::string)>& lambda = [](std::string) {},
+        EnvIt envBegin = dummyVec.begin(), EnvIt envEnd = dummyVec.end()) {
     Process childProcess(commandPath, firstArg, lastArg, envBegin, envEnd);
     childProcess.start();
 
@@ -366,21 +360,23 @@ int execute(const std::string& commandPath, ArgIt firstArg, ArgIt lastArg,
 /**
  * Execute a subprocess and optionally call a function per line of stdout.
  * @param commandPath   - the path of the executable to execute, e.g. "/bin/cat"
- * @param commandArgs   - the extra arguments for an executable e.g. {"argument 1", "henlo"} (default no arguments)
+ * @param commandArgs   - the extra arguments for an executable e.g. {"argument 1", "henlo"} (default no
+ * arguments)
  * @param stdinInput    - a list of inputs that will be piped into the processes' stdin (default no stdin)
- * @param lambda        - a function that is called with every line from the executed process (default NOP function)
+ * @param lambda        - a function that is called with every line from the executed process (default NOP
+ * function)
  * @param env           - a list of environment variables that the process will execute with (default nothing)
  */
-template<class ArgIterable = std::vector<std::string>, 
-         class StdinIterable = std::vector<std::string>, 
-         class EnvIterable = std::vector<std::string>,
-         typename = typename std::enable_if<is_iterable<ArgIterable>::value, void>::type,
-         typename = typename std::enable_if<is_iterable<StdinIterable>::value, void>::type,
-         typename = typename std::enable_if<is_iterable<EnvIterable>::value, void>::type>
-int execute(const std::string& commandPath, const ArgIterable& commandArgs = {}, 
-            const StdinIterable& stdinInput = {}, const std::function<void(std::string)>& lambda = [](std::string){}, 
-            const EnvIterable& env = {}) {
-    return execute(commandPath, commandArgs.begin(), commandArgs.end(), stdinInput.begin(), stdinInput.end(), lambda, env.begin(), env.end());
+template <class ArgIterable = std::list<std::string>, class StdinIterable = std::list<std::string>,
+        class EnvIterable = std::list<std::string>,
+        typename = typename std::enable_if<is_iterable<ArgIterable>::value, void>::type,
+        typename = typename std::enable_if<is_iterable<StdinIterable>::value, void>::type,
+        typename = typename std::enable_if<is_iterable<EnvIterable>::value, void>::type>
+int execute(const std::string& commandPath, const ArgIterable& commandArgs = {},
+        const StdinIterable& stdinInput = {},
+        const std::function<void(std::string)>& lambda = [](std::string) {}, const EnvIterable& env = {}) {
+    return execute(commandPath, commandArgs.begin(), commandArgs.end(), stdinInput.begin(), stdinInput.end(),
+            lambda, env.begin(), env.end());
 }
 
 /**
@@ -390,21 +386,23 @@ int execute(const std::string& commandPath, const ArgIterable& commandArgs = {},
  * @param lastArg       - the end iterator for a list of arguments
  * @param stdinBegin    - an InputIterator to provide stdin
  * @param stdinEnd      - the end of the InputIterator range for stdin
- * @param lambda        - a function that is called with every line from the executed process (default NOP function)
+ * @param lambda        - a function that is called with every line from the executed process (default NOP
+ * function)
  * @param envBegin      - the begin of an iterator containing process environment variables to set
  * @param envEnd        - the end of the env iterator
  */
-template<class ArgIt, class StdinIt = DummyContainer::iterator,
-         class EnvIt = DummyContainer::iterator,
-         typename = typename std::enable_if<is_iterator<ArgIt>::value, void>::type,
-         typename = typename std::enable_if<is_iterator<StdinIt>::value, void>::type,
-         typename = typename std::enable_if<is_iterator<EnvIt>::value, void>::type>
+template <class ArgIt, class StdinIt = DummyContainer::iterator, class EnvIt = DummyContainer::iterator,
+        typename = typename std::enable_if<is_iterator<ArgIt>::value, void>::type,
+        typename = typename std::enable_if<is_iterator<StdinIt>::value, void>::type,
+        typename = typename std::enable_if<is_iterator<EnvIt>::value, void>::type>
 std::vector<std::string> check_output(const std::string& commandPath, ArgIt firstArg, ArgIt lastArg,
-                                      StdinIt stdinBegin = dummyVec.begin(), StdinIt stdinEnd = dummyVec.end(),
-                                      EnvIt envBegin = dummyVec.begin(), EnvIt envEnd = dummyVec.end()) {
+        StdinIt stdinBegin = dummyVec.begin(), StdinIt stdinEnd = dummyVec.end(),
+        EnvIt envBegin = dummyVec.begin(), EnvIt envEnd = dummyVec.end()) {
     std::vector<std::string> retVec;
-    //int status = execute(commandPath, firstArg, lastArg, stdinBegin, stdinEnd, [&](std::string s) { retVec.push_back(std::move(s)); }, envBegin, envEnd);
-    execute(commandPath, firstArg, lastArg, stdinBegin, stdinEnd, [&](std::string s) { retVec.push_back(std::move(s)); }, envBegin, envEnd);
+    // int status = execute(commandPath, firstArg, lastArg, stdinBegin, stdinEnd, [&](std::string s) {
+    // retVec.push_back(std::move(s)); }, envBegin, envEnd);
+    execute(commandPath, firstArg, lastArg, stdinBegin, stdinEnd,
+            [&](std::string s) { retVec.push_back(std::move(s)); }, envBegin, envEnd);
     return retVec;
 }
 
@@ -415,19 +413,19 @@ std::vector<std::string> check_output(const std::string& commandPath, ArgIt firs
  * @param stdinInput    - a list of inputs that will be piped into the processes' stdin
  * @param env           - a list of environment variables that the process will execute with (default nothing)
  */
-template<class ArgIterable = std::vector<std::string>, 
-         class StdinIterable = std::vector<std::string>, 
-         class EnvIterable = std::vector<std::string>,
-         typename = typename std::enable_if<is_iterable<ArgIterable>::value, void>::type,
-         typename = typename std::enable_if<is_iterable<StdinIterable>::value, void>::type,
-         typename = typename std::enable_if<is_iterable<EnvIterable>::value, void>::type>
-std::vector<std::string> check_output(const std::string& commandPath, const ArgIterable& commandArgs = {}, 
-                                      const StdinIterable& stdinInput = {}, const EnvIterable& env = {}) {
-    return check_output(commandPath, commandArgs.begin(), commandArgs.end(), stdinInput.begin(), stdinInput.end(), env.begin(), env.end());
+template <class ArgIterable = std::vector<std::string>, class StdinIterable = std::vector<std::string>,
+        class EnvIterable = std::vector<std::string>,
+        typename = typename std::enable_if<is_iterable<ArgIterable>::value, void>::type,
+        typename = typename std::enable_if<is_iterable<StdinIterable>::value, void>::type,
+        typename = typename std::enable_if<is_iterable<EnvIterable>::value, void>::type>
+std::vector<std::string> check_output(const std::string& commandPath, const ArgIterable& commandArgs = {},
+        const StdinIterable& stdinInput = {}, const EnvIterable& env = {}) {
+    return check_output(commandPath, commandArgs.begin(), commandArgs.end(), stdinInput.begin(),
+            stdinInput.end(), env.begin(), env.end());
 }
 
 //// TODO: what if the process terminates? consider error handling potentials...
-//class ProcessStream {
+// class ProcessStream {
 //    public:
 //        ProcessStream(const std::string& commandPath, const std::vector<std::string>& commandArgs);
 //
@@ -445,7 +443,7 @@ std::vector<std::string> check_output(const std::string& commandPath, const ArgI
 //};
 
 /* spawn the process in the background asynchronously, and return a future of the status code */
-//std::future<int> async(const std::string commandPath, const std::vector<std::string> commandArgs,
+// std::future<int> async(const std::string commandPath, const std::vector<std::string> commandArgs,
 //        std::list<std::string> stringInput, std::function<void(std::string)> lambda) {
 //    // spawn the function async - we must pass the args by value into the async lambda
 //    // otherwise they may destruct before the execute fn executes!
@@ -462,10 +460,10 @@ std::vector<std::string> check_output(const std::string& commandPath, const ArgI
  * output, it may be not input into the functor until another line is fed in. You may modify the delay to try
  * and wait longer until moving on. This delay must exist, as several programs may not output a line for each
  * line input. Consider grep - it will not output a line if no match is made for that input. */
-//class ProcessStream {
+// class ProcessStream {
 //    Process childProcess;
 //
-//public:
+// public:
 //    ProcessStream(const std::string& commandPath, const std::vector<std::string>& commandArgs,
 //            std::list<std::string>& stringInput) {
 //        childProcess.start(commandPath, commandArgs);
