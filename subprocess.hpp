@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <chrono>
 #include <functional>
 #include <future>
 #include <iostream>
@@ -12,13 +13,14 @@
 
 // unix process stuff
 #include <cstring>
+#include <poll.h>
 #include <signal.h>
 #include <sys/prctl.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 namespace subprocess {
-
+namespace internal {
 /**
  * A TwoWayPipe that allows reading and writing between two processes
  * must call initialize before being passed between processes or used
@@ -32,7 +34,8 @@ private:
     std::string internalBuffer;
     bool inStreamGood = true;
     bool endSelected = false;
-
+    bool initialized = false;
+    size_t currentSearchPos = 0;
     /**
      * closes the ends that aren't used (do we need to do this?
      * */
@@ -43,6 +46,54 @@ private:
         close(output_pipe_file_descriptor[0]);
     }
 
+    /**
+     * reads up to n bytes into the internal buffer
+     * @param n - the max number of bytes to read in
+     * @return the number of bytes read in, -1 in the case of an
+     * error
+     * */
+    ssize_t readToInternalBuffer() {
+        char buf[256];
+        ssize_t bytesCounted = -1;
+
+        while ((bytesCounted = read(input_pipe_file_descriptor[0], buf, 256)) <= 0) {
+            if (bytesCounted < 0) {
+                if (errno != EINTR) { /* interrupted by sig handler return */
+                    inStreamGood = false;
+                    return -1;
+                }
+            } else if (bytesCounted == 0) { /* EOF */
+                return 0;
+            }
+        }
+
+        internalBuffer.append(buf, bytesCounted);
+        return bytesCounted;
+    }
+
+    /**
+     * tests pipe state, returns short which represents the status.
+     * If POLLIN bit is set then it can be read from, if POLLHUP bit is
+     * set then the write end has closed.
+     * */
+    short inPipeState(long wait_ms) {
+        // file descriptor struct to check if pollin bit will be set
+        struct pollfd fds = {.fd = input_pipe_file_descriptor[0], .events = POLLIN};
+        // poll with no wait time
+        int res = poll(&fds, 1, wait_ms);
+
+        // if res < 0 then an error occurred with poll
+        // POLLERR is set for some other errors
+        // POLLNVAL is set if the pipe is closed
+        if (res < 0 || fds.revents & (POLLERR | POLLNVAL)) {
+            // TODO
+            // an error occurred, check errno then throw exception if it is critical
+        }
+        // check if there is either data in the pipe or the other end is closed
+        //(in which case a call will not block, it will simply return 0 bytes)
+        return fds.revents;
+    }
+
 public:
     TwoWayPipe() = default;
 
@@ -51,8 +102,17 @@ public:
      * this is called
      * */
     void initialize() {
-        pipe(input_pipe_file_descriptor);
-        pipe(output_pipe_file_descriptor);
+        if (initialized) {
+            return;
+        }
+        bool failed = pipe(input_pipe_file_descriptor) < 0;
+        failed |= pipe(output_pipe_file_descriptor) < 0;
+        if (failed)
+        {
+            // error occurred, check errno and throw relevant exception
+        } else {
+            initialized = true;
+        }
     }
 
     /**
@@ -106,48 +166,24 @@ public:
     }
 
     /**
-     * reads up to n bytes into the internal buffer
-     * @param n - the max number of bytes to read in
-     * @return the number of bytes read in, -1 in the case of an
-     * error
-     * */
-    ssize_t readToInternalBuffer() {
-        char buf[256];
-        ssize_t bytesCounted = -1;
-
-        while ((bytesCounted = read(input_pipe_file_descriptor[0], buf, 256)) <= 0) {
-            if (bytesCounted < 0) {
-                if (errno != EINTR) { /* interrupted by sig handler return */
-                    inStreamGood = false;
-                    return -1;
-                }
-            } else if (bytesCounted == 0) { /* EOF */
-                inStreamGood = false;
-                return 0;
-            }
-        }
-
-        internalBuffer.append(buf, bytesCounted);
-        return bytesCounted;
-    }
-
-    /**
-     * read line from the pipe - Not threadsafe
-     * blocks until either a newline is read or the other end of the
-     * pipe is closed
+     * Read line from the pipe - Not threadsafe
+     * Blocks until either a newline is read
+     *  or the other end of the pipe is closed
      * @return the string read from the pipe or the empty string if
      * there was not a line to read.
      * */
     std::string readLine() {
         size_t firstNewLine;
-        size_t currentSearchPos = 0;
+
         while ((firstNewLine = internalBuffer.find_first_of('\n', currentSearchPos)) == std::string::npos) {
+            currentSearchPos = internalBuffer.size();
             ssize_t bytesRead = readToInternalBuffer();
             if (bytesRead < 0) {
                 std::cerr << "errno " << errno << " occurred" << std::endl;
                 return "";
             }
-            if (bytesRead == 0) {
+            if (bytesRead == 0) {  // an EOF was reached, return the final line
+                inStreamGood = false;
                 return internalBuffer;
             }
         }
@@ -157,10 +193,47 @@ public:
 
         internalBuffer.erase(firstNewLine + 1);
         internalBuffer.swap(endOfInternalBuffer);
-
+        currentSearchPos = 0;
         // now contains the first characters up to and
         // including the newline character
         return endOfInternalBuffer;
+    }
+
+    bool canReadLine(long wait_ms) {
+        if (!inStreamGood) {
+            return false;
+        }
+        while (true) {
+            size_t firstNewLine = internalBuffer.find_first_of('\n', currentSearchPos);
+            if (firstNewLine != std::string::npos) {
+                // this means that the next call to readLine won't
+                // have to search through the whole string again
+                currentSearchPos = firstNewLine;
+                return true;
+            }
+            currentSearchPos = internalBuffer.size();
+            short pipeState = inPipeState(wait_ms);
+            if (!(pipeState & POLLIN)) {               // no bytes to read in pipe
+                if (pipeState & POLLHUP) {             // the write end has closed
+                    if (internalBuffer.size() == 0) {  // and theres no bytes in the buffer
+                                                       // this pipe is done
+                        inStreamGood = false;
+                        return false;
+                    }
+                    // the buffer can be read as the final string
+                    return true;
+                }
+                // pipe is still good, it just hasn't got anything in it
+                return false;
+            }
+
+            ssize_t bytesRead = readToInternalBuffer();
+
+            if (bytesRead < 0) {
+                // error check errno and throw exception
+                return false;  // for now just return false
+            }
+        }
     }
 
     void closeOutput() {
@@ -186,13 +259,15 @@ public:
      * Starts a seperate process with the provided command and
      * arguments This also initializes the TwoWayPipe
      * @param commandPath - an absolute string to the program path
-     * @param commandArgs - an iterable container of strings that
+     * @param argsItBegin - the begin iterator to strings that
+     * will be passed as arguments
+     * @param argsItEnd - the end iterator to strings that
      * will be passed as arguments
      * @return TODO return errno returned by child call of execv
      * (need to use the TwoWayPipe)
      * */
-    template <class Iterable>
-    void start(const std::string& commandPath, Iterable& args) {
+    template <class InputIT>
+    void start(const std::string& commandPath, InputIT argsItBegin, InputIT argsItEnd) {
         pid = 0;
         pipe.initialize();
         // construct the argument list (unfortunately,
@@ -202,8 +277,9 @@ public:
         std::vector<char*> cargs;
         // the process name must be first for execv
         cargs.push_back(const_cast<char*>(commandPath.c_str()));
-        for (const std::string& arg : args) {
-            cargs.push_back(const_cast<char*>(arg.c_str()));
+        while (argsItBegin != argsItEnd) {
+            cargs.push_back(const_cast<char*>((*argsItBegin).c_str()));
+            argsItBegin++;
         }
         // must be terminated with a nullptr for execv
         cargs.push_back(nullptr);
@@ -228,9 +304,20 @@ public:
         pipe.setAsParentEnd();
     }
 
-    std::string readLine() {
-        if (!pipe.isGood()) return "";
-        return pipe.readLine();
+    template <typename Rep = long>
+    bool isReady(std::chrono::duration<Rep> timeout = std::chrono::duration<long>(0)) {
+        if (timeout.count() < 0) {
+            return pipe.canReadLine(-1);
+        }
+        return pipe.canReadLine(std::chrono::duration_cast<std::chrono::milliseconds>(timeout).count());
+    }
+
+    template <typename Rep = long>
+    std::string readLine(std::chrono::duration<Rep> timeout = std::chrono::duration<long>(-1)) {
+        if (isReady(timeout)) {
+            return pipe.readLine();
+        }
+        return "";
     }
 
     size_t write(const std::string& input) {
@@ -255,6 +342,75 @@ public:
         return status;
     }
 };
+}
+/**
+ * Execute a subprocess and optionally call a function per line of stdout.
+ * @param commandPath   - the path of the executable to execute, e.g. "/bin/cat"
+ * @param commandArgs   - the extra arguments for an executable e.g. {"argument 1", "henlo"}
+ * @param stdinInput    - a list of inputs that will be piped into the processes' stdin
+ * @param lambda        - a function that is called with every line from the executed process (default NOP function)
+ * @param env           - a list of environment variables that the process will execute with (default nothing)
+ */
+int execute(const std::string& commandPath, const std::vector<std::string>& commandArgs,
+        const std::vector<std::string>& stdinInput,
+        const std::function<void(std::string)>& lambda = [](std::string) {},
+        const std::vector<std::string>& env = {});
+
+/**
+ * Execute a subprocess and optionally call a function per line of stdout.
+ * @param commandPath   - the path of the executable to execute, e.g. "/bin/cat"
+ * @param commandArgs   - the extra arguments for an executable e.g. {"argument 1", "henlo"}
+ * @param stdinBegin    - an InputIterator to provide stdin
+ * @param stdinEnd      - the end of the InputIterator range for stdin
+ * @param lambda        - a function that is called with every line from the executed process (default NOP function)
+ * @param env           - a list of environment variables that the process will execute with (default nothing)
+ */
+template <class InputIt>
+int execute(const std::string& commandPath, const std::vector<std::string>& commandArgs, InputIt stdinBegin,
+        InputIt stdinEnd, const std::function<void(std::string)>& lambda = [](std::string) {},
+        const std::vector<std::string>& env = {});
+
+/**
+ * Execute a subprocess and retrieve the output of the command
+ * @param commandPath   - the path of the executable to execute, e.g. "/bin/cat"
+ * @param commandArgs   - the extra arguments for an executable e.g. {"argument 1", "henlo"}
+ * @param stdinInput    - a list of inputs that will be piped into the processes' stdin
+ * @param env           - a list of environment variables that the process will execute with (default nothing)
+ */
+std::vector<std::string> check_output(const std::string& commandPath,
+        const std::vector<std::string>& commandArgs, const std::vector<std::string>& stdioInput,
+        const std::vector<std::string>& env = {});
+
+/**
+ * Execute a subprocess and retrieve the output of the command
+ * @param commandPath   - the path of the executable to execute, e.g. "/bin/cat"
+ * @param commandArgs   - the extra arguments for an executable e.g. {"argument 1", "henlo"}
+ * @param stdinBegin    - an InputIterator to provide stdin
+ * @param stdinEnd      - the end of the InputIterator range for stdin
+ * @param env           - a list of environment variables that the process will execute with (default nothing)
+ */
+template <class InputIt>
+std::vector<std::string> check_output(const std::string& commandPath,
+        const std::vector<std::string>& commandArgs, InputIt stdioBegin, InputIt stdioEnd,
+        const std::vector<std::string>& env = {});
+
+// // TODO: what if the process terminates? consider error handling potentials...
+// class ProcessStream {
+//     public:
+//         ProcessStream(const std::string& commandPath, const std::vector<std::string>& commandArgs);
+
+//         // write a line to the subprocess's stdin
+//         void write(const std::string& inputLine);
+//         // read a line and block until received (or until timeout reached)
+//         template<typename Rep>
+//         std::string read(std::chrono::duration<Rep> timeout=-1);
+//         // if there is a line for reading
+//         template<typename Rep>
+//         bool ready(std::chrono::duration<Rep> timeout=0);
+
+//         ProcessStream& operator<<(const std::string& inputLine);
+//         ProcessStream& operator>>(std::string& outputLine);
+// };
 
 /**
  * Execute a process, inputting stdin and calling the functor with the stdout
@@ -269,8 +425,8 @@ public:
 int execute(const std::string& commandPath, const std::vector<std::string>& commandArgs,
         std::list<std::string>& stringInput /* what pumps into stdin */,
         std::function<void(std::string)> lambda) {
-    Process childProcess;
-    childProcess.start(commandPath, commandArgs);
+    internal::Process childProcess;
+    childProcess.start(commandPath, commandArgs.begin(), commandArgs.end());
 
     // while our string queue is working,
     while (!stringInput.empty()) {
@@ -321,12 +477,12 @@ std::future<int> async(const std::string commandPath, const std::vector<std::str
  * and wait longer until moving on. This delay must exist, as several programs may not output a line for each
  * line input. Consider grep - it will not output a line if no match is made for that input. */
 class ProcessStream {
-    Process childProcess;
+    internal::Process childProcess;
 
 public:
     ProcessStream(const std::string& commandPath, const std::vector<std::string>& commandArgs,
             std::list<std::string>& stringInput) {
-        childProcess.start(commandPath, commandArgs);
+        childProcess.start(commandPath, commandArgs.begin(), commandArgs.end());
 
         // while our string queue is working,
         while (!stringInput.empty()) {
