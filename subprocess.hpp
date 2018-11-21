@@ -308,17 +308,7 @@ public:
         if (timeout.count() < 0) {
             return pipe.canReadLine(-1);
         }
-        auto end = std::chrono::high_resolution_clock::now() + timeout;
-        auto ms_remaining = std::chrono::duration_cast<std::chrono::milliseconds>(timeout);
-
-        do {
-            if (pipe.canReadLine(std::max(ms_remaining.count(), 0L))) {
-                return true;
-            }
-            ms_remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    end - std::chrono::high_resolution_clock::now());
-        } while (ms_remaining.count() > 0);
-        return false;
+        return pipe.canReadLine(std::chrono::duration_cast<std::chrono::milliseconds>(timeout).count());
     }
 
     template <typename Rep = long>
