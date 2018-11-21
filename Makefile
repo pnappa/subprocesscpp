@@ -1,9 +1,9 @@
 
-CXX=g++
+CXX=clang++
 CXXFLAGS=-g -std=c++11 -Wall -pedantic
 LIBS=-lpthread
 
-.PHONY: all clean
+.PHONY: all clean check
 all: demo check
 
 clean:

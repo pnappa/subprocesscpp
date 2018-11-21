@@ -9,7 +9,6 @@
 
 #include "subprocess.hpp"
 
-/* TODO: test all permuations of arguments */
 TEST_CASE("[iterable] basic echo execution", "[subprocess::execute]") {
     std::list<std::string> inputs;
     std::vector<std::string> outputs;
@@ -140,7 +139,6 @@ TEST_CASE("[iterator] basic echo execution", "[subprocess::execute]") {
     REQUIRE(status == 0);
 }
 
-/* TODO: make the rest iterators */
 TEST_CASE("[iterator] no trailing output newline echo execution", "[subprocess::execute]") {
     std::list<std::string> inputs;
     std::vector<std::string> outputs;
@@ -191,7 +189,7 @@ TEST_CASE("[iterator] stdin execute simple cat no trailing newline for last inpu
     REQUIRE(outputs.at(1) == "1,2,3,4");
 }
 
-TEST_CASE("checkOutput simple case cat", "[subprocess::checkOutput]") {
+TEST_CASE("[iterable] check_output simple case bc", "[subprocess::check_output]") {
     // execute bc and pass it some equations
     std::list<std::string> inputs = {"1+1\n", "2^333\n", "32-32\n"};
     // this one is interesting, there's more than one line of stdout for each input (bc line breaks after a
@@ -201,6 +199,88 @@ TEST_CASE("checkOutput simple case cat", "[subprocess::checkOutput]") {
             "623993595007385788105416184430592\n", "0\n"};
     std::vector<std::string> out = subprocess::check_output("/usr/bin/bc", {}, inputs);
 
+    REQUIRE(out.size() == output_expected.size());
+    REQUIRE(out == output_expected);
+}
+
+TEST_CASE("[iterable] check_output permutations (varargs)", "[subprocess::check_output]") {
+    // execute echo over a series of lines
+    std::list<std::string> inputs = {"line1\n", "line2\n", "line3\n"};
+    std::list<std::string> env = {"LOL=lol"};
+    std::vector<std::string> output_expected = {"line1\n", "line2\n", "line3\n"};
+    std::vector<std::string> out;
+
+    out.clear();
+    out = subprocess::check_output("/bin/cat", {}, inputs, env);
+    REQUIRE(out.size() == output_expected.size());
+    REQUIRE(out == output_expected);
+
+    out.clear();
+    out = subprocess::check_output("/bin/cat", {}, inputs);
+    REQUIRE(out.size() == output_expected.size());
+    REQUIRE(out == output_expected);
+
+    // now do the same with echo (as we're limited to args only at this point)
+    out.clear();
+    std::vector<std::string> args = {"value"};
+    output_expected = {"value\n"};
+    out = subprocess::check_output("/bin/echo", args);
+    REQUIRE(out.size() == output_expected.size());
+    REQUIRE(out == output_expected);
+
+    // and echo without any args just outputs a blank line
+    out.clear();
+    output_expected = {"\n"};
+    out = subprocess::check_output("/bin/echo");
+    REQUIRE(out.size() == output_expected.size());
+    REQUIRE(out == output_expected);
+}
+
+TEST_CASE("[iterator] check_output simple case bc", "[subprocess::check_output]") {
+    std::vector<std::string> args;
+    // execute bc and pass it some equations
+    std::list<std::string> inputs = {"1+1\n", "2^333\n", "32-32\n"};
+    // this one is interesting, there's more than one line of stdout for each input (bc line breaks after a
+    // certain number of characters)
+    std::vector<std::string> output_expected = {"2\n",
+            "17498005798264095394980017816940970922825355447145699491406164851279\\\n",
+            "623993595007385788105416184430592\n", "0\n"};
+    std::vector<std::string> out = subprocess::check_output("/usr/bin/bc", args.begin(), args.end(), inputs.begin(), inputs.end());
+
+    REQUIRE(out.size() == output_expected.size());
+    REQUIRE(out == output_expected);
+}
+
+TEST_CASE("[iterator] check_output permutations (varargs)", "[subprocess::check_output]") {
+    // execute echo over a series of lines
+    std::deque<std::string> args; 
+    std::list<std::string> inputs = {"line1\n", "line2\n", "line3\n"};
+    std::list<std::string> env = {"LOL=lol"};
+    std::vector<std::string> output_expected = {"line1\n", "line2\n", "line3\n"};
+    std::vector<std::string> out;
+
+    out.clear();
+    out = subprocess::check_output("/bin/cat", args.begin(), args.end(), inputs.begin(), inputs.end(), env.begin(), env.end());
+    REQUIRE(out.size() == output_expected.size());
+    REQUIRE(out == output_expected);
+
+    out.clear();
+    out = subprocess::check_output("/bin/cat", args.begin(), args.end(), inputs.begin(), inputs.end());
+    REQUIRE(out.size() == output_expected.size());
+    REQUIRE(out == output_expected);
+
+    // now do the same with echo (as we're limited to args only at this point)
+    out.clear();
+    args = {"value"};
+    output_expected = {"value\n"};
+    out = subprocess::check_output("/bin/echo", args.begin(), args.end());
+    REQUIRE(out.size() == output_expected.size());
+    REQUIRE(out == output_expected);
+
+    // and echo without any args just outputs a blank line
+    out.clear();
+    output_expected = {"\n"};
+    out = subprocess::check_output("/bin/echo");
     REQUIRE(out.size() == output_expected.size());
     REQUIRE(out == output_expected);
 }
