@@ -105,9 +105,10 @@ public:
         if (initialized) {
             return;
         }
-        int res = pipe(input_pipe_file_descriptor);
-        res += pipe(output_pipe_file_descriptor);
-        if (res < 0) {
+		bool failed = pipe(input_pipe_file_descriptor) < 0;
+		failed |= pipe(output_pipe_file_descriptor) < 0;
+		if (failed)
+		{
             // error occurred, check errno and throw relevant exception
         } else {
             initialized = true;
