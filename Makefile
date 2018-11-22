@@ -3,7 +3,7 @@ CXX=clang++
 CXXFLAGS=-g -std=c++11 -Wall -pedantic
 LIBS=-lpthread
 
-.PHONY: all clean check
+.PHONY: all clean check test_programs
 all: demo check
 
 clean:
@@ -21,3 +21,6 @@ test: test.cpp subprocess.hpp
 coverage: test.cpp subprocess.hpp
 	$(CXX) $(CXXFLAGS) -fprofile-arcs -ftest-coverage test.cpp -o coverage $(LIBS)
 	.codecov/run_coverage.sh
+
+test_programs:
+	$(MAKE) -C test_programs/
