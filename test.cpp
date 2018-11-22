@@ -9,6 +9,14 @@
 
 #include "subprocess.hpp"
 
+/*
+ * Some additional tests I'd like/things to improve:
+ *  - TODO: replace these system binaries with hand written ones in test_programs, 
+ *          so we can ensure these are all available across all systems.
+ *  - TODO: add some more tests about lots of output generated for little inputs
+ *  - TODO: add some tests which will fill up the pipe fully (https://unix.stackexchange.com/questions/11946/how-big-is-the-pipe-buffer)
+ */
+
 TEST_CASE("[iterable] basic echo execution", "[subprocess::execute]") {
     std::list<std::string> inputs;
     std::vector<std::string> outputs;
@@ -34,7 +42,8 @@ TEST_CASE("[iterable] basic echo execution varargs", "[subprocess::execute]") {
     REQUIRE(outputs.size() == 1);
     REQUIRE(status == 0);
 
-    // XXX: this causes a linker error..?
+    // XXX: this causes a linker error..? well.. it used to.
+    // I think I need to fix the template for the Iterator one, to be more strict in what it accepts (i think it might actually be able to cast some Iterables to Iterators)
     outputs.clear();
     status = subprocess::execute("/bin/echo", {"hello"}, inputs);
     REQUIRE(status == 0);

@@ -422,6 +422,11 @@ int execute(const std::string& commandPath, ArgIt firstArg, ArgIt lastArg,
     internal::Process childProcess(commandPath, firstArg, lastArg, envBegin, envEnd);
     childProcess.start();
 
+    // TODO: fix this so we can't block the input/output pipe. it should only require
+    // reading from the process so-as to unclog their pipe. Pipes only have finite space! (~65k)
+    // but remember, we may need to read more than one line per for loop (if a process outputs a lot of lines
+    // per line read in, perhaps..?)
+
     // write our input to the processes stdin pipe
     for (auto it = stdinBegin; it != stdinEnd; ++it) {
         childProcess.write(*it);
@@ -505,117 +510,62 @@ std::vector<std::string> check_output(const std::string& commandPath, const ArgI
             stdinInput.end(), env.begin(), env.end());
 }
 
-//// TODO: what if the process terminates? consider error handling potentials...
-// class ProcessStream {
-//    public:
-//        ProcessStream(const std::string& commandPath, const std::vector<std::string>& commandArgs);
-//
-//        // write a line to the subprocess's stdin
-//        void write(const std::string& inputLine);
-//        // read a line and block until received (or until timeout reached)
-//        template<typename Rep>
-//        std::string read(std::chrono::duration<Rep> timeout=-1);
-//        // if there is a line for reading
-//        template<typename Rep>
-//        bool ready(std::chrono::duration<Rep> timeout=0);
-//
-//        ProcessStream& operator<<(const std::string& inputLine);
-//        ProcessStream& operator>>(std::string& outputLine);
-//};
+// TODO: what if the process terminates? consider error handling potentials...
+class ProcessStream {
+        // need some list of processes this process is supposed to pipe to
+        // shouldn't need to store the lambda, as the internal::Process object will store that
+        // std::vector<ProcessStream&> nextProcesses;
 
-/* spawn the process in the background asynchronously, and return a future of the status code */
-// std::future<int> async(const std::string commandPath, const std::vector<std::string> commandArgs,
-//        std::list<std::string> stringInput, std::function<void(std::string)> lambda) {
-//    // spawn the function async - we must pass the args by value into the async lambda
-//    // otherwise they may destruct before the execute fn executes!
-//    // whew, that was an annoying bug to find...
-//    return std::async(std::launch::async,
-//            [&](const std::string cp, const std::vector<std::string> ca, std::list<std::string> si,
-//                    std::function<void(std::string)> l) { return execute(cp, ca, si, l); },
-//            commandPath, commandArgs, stringInput, lambda);
-//}
+    public:
+        template<typename Functor = std::function<void(std::string)>>
+            ProcessStream(const std::string& commandPath, const std::vector<std::string>& commandArgs, const Functor& func = [](std::string){});
 
-/* TODO: refactor up this function so that there isn't duplicated code - most of this is identical to the
- * execute fn execute a program and stream the output after each line input this function calls select to
- * check if outputs needs to be pumped after each line input. This means that if the line takes too long to
- * output, it may be not input into the functor until another line is fed in. You may modify the delay to try
- * and wait longer until moving on. This delay must exist, as several programs may not output a line for each
- * line input. Consider grep - it will not output a line if no match is made for that input. */
-// class ProcessStream {
-//    Process childProcess;
-//
-// public:
-//    ProcessStream(const std::string& commandPath, const std::vector<std::string>& commandArgs,
-//            std::list<std::string>& stringInput) {
-//        childProcess.start(commandPath, commandArgs);
-//
-//        // while our string queue is working,
-//        while (!stringInput.empty()) {
-//            // write our input to the
-//            // process's stdin pipe
-//            std::string newInput = stringInput.front();
-//            stringInput.pop_front();
-//            childProcess.write(newInput);
-//        }
-//        // now we finished chucking in the string, send
-//        // an EOF
-//        childProcess.sendEOF();
-//    }
-//
-//    ~ProcessStream() {
-//        childProcess.waitUntilFinished();
-//    }
-//
-//    struct iterator {
-//        ProcessStream* ps;
-//        bool isFinished = false;
-//        // current read line of the process
-//        std::string cline;
-//
-//        iterator(ProcessStream* ps) : ps(ps) {
-//            // increment this ptr, because nothing exists initially
-//            ++(*this);
-//        }
-//        // ctor for end()
-//        iterator(ProcessStream* ps, bool) : ps(ps), isFinished(true) {}
-//
-//        const std::string& operator*() const {
-//            return cline;
-//        }
-//
-//        /* preincrement */
-//        iterator& operator++() {
-//            // iterate over each line output by the child's stdout, and call the functor
-//            cline = ps->childProcess.readLine();
-//            if (cline.empty()) {
-//                isFinished = true;
-//            }
-//            return *this;
-//        }
-//
-//        /* post increment */
-//        iterator operator++(int) {
-//            iterator old(*this);
-//            ++(*this);
-//            return old;
-//        }
-//
-//        bool operator==(const iterator& other) const {
-//            return other.ps == this->ps && this->isFinished == other.isFinished;
-//        }
-//
-//        bool operator!=(const iterator& other) const {
-//            return !((*this) == other);
-//        }
-//    };
-//
-//    iterator begin() {
-//        return iterator(this);
-//    }
-//
-//    iterator end() {
-//        return iterator(this, true);
-//    }
-//};
+        ~ProcessStream();
+
+        // start the process and prevent any more pipes from being established.
+        // may throw an exception?
+        bool start();
+
+        // write a line to the subprocess's stdin
+        void write(const std::string& inputLine);
+        // read a line and block until received (or until timeout reached)
+        template<typename Rep>
+            std::string read(std::chrono::duration<Rep> timeout=-1);
+        // if there is a line for reading (optionally 
+        template<typename Rep>
+            bool ready(std::chrono::duration<Rep> timeout=0);
+
+        // pipe some data to the receiver process, and return the receiver process
+        // we do this so we can have: process1.pipe_to(process2).pipe_to(process3)...etc
+        // if pipes are set up there are some restrictions on using the << and >> operators.
+        // if a process is receiving from another process, then they cannot use operator<< anymore
+        //      hmm: what about if its done before .start()?
+        // if a process is outputting to another, they cannot use operator>> 
+        ProcessStream& pipe_to(ProcessStream& receiver);
+        // ditto
+        ProcessStream& operator>>(ProcessStream& receiver);
+
+        // read a line into this process (so it acts as another line of stdin)
+        // instead of string, probably should be typename Stringable, and use stringstream and stuff.
+        ProcessStream& operator<<(const std::string& inputLine);
+        // retrieve a line of stdout from this process
+        ProcessStream& operator>>(std::string& outputLine);
+        // write all stdout to file?
+        ProcessStream& operator>>(std::ofstream& outfile);
+
+        // some other functions which maybe useful (perhaps take a timeout?)
+        // returns whether it could terminate
+        bool terminate();
+        // a more...extreme way
+        bool kill();
+        // send arbitrary signals to the subprocess
+        void signal(int signum);
+
+        class iterator;
+
+        // provide an iterator to iterate over the stdout produced
+        iterator begin();
+        iterator end();
+};
 
 }  // end namespace subprocess
