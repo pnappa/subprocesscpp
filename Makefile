@@ -12,7 +12,7 @@ clean:
 demo: demo.cpp subprocess.hpp
 	$(CXX) $(CXXFLAGS) demo.cpp -o demo $(LIBS)
 
-check: test
+check: test test_programs
 	valgrind ./test
 
 test: test.cpp subprocess.hpp
