@@ -13,6 +13,9 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
+#include <cassert>
+#include <deque>
+#include <fstream>
 
 // unix process stuff
 #include <cstring>
@@ -21,6 +24,7 @@
 #include <sys/prctl.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
 
 namespace subprocess {
 namespace internal {
@@ -430,11 +434,16 @@ int execute(const std::string& commandPath, ArgIt firstArg, ArgIt lastArg,
     // write our input to the processes stdin pipe
     for (auto it = stdinBegin; it != stdinEnd; ++it) {
         childProcess.write(*it);
+
+        // propagate output as we need to ensure the output pipe isn't clogged
+        while (childProcess.isReady()) {
+            lambda(childProcess.readLine());
+        }
     }
     // close the stdin for the process
     childProcess.sendEOF();
 
-    // iterate over each line output by the child's stdout, and call the functor
+    // iterate over each line of remaining output by the child's stdout, and call the functor
     std::string processOutput;
     while ((processOutput = childProcess.readLine()).size() > 0) {
         lambda(processOutput);
@@ -511,23 +520,130 @@ std::vector<std::string> check_output(const std::string& commandPath, const ArgI
 }
 
 // TODO: what if the process terminates? consider error handling potentials...
-class ProcessStream {
-        // need some list of processes this process is supposed to pipe to
-        // shouldn't need to store the lambda, as the internal::Process object will store that
-        // std::vector<ProcessStream&> nextProcesses;
+class Process {
+        // need some list of processes this process is supposed to pipe to (if any)
+        // XXX: what if the child processes are moved? should we keep a reference to the parent(s) then update us within their vector..?
+        std::vector<Process*> successor_processes;
+        std::vector<std::ifstream*> feedin_files;
+        std::vector<std::ofstream*> feedout_files;
+        bool started = false;
+
+        internal::Process owned_proc;
+
+        std::deque<std::string> stdinput_queue;
+    protected:
+
+        void pump_input() {
+            assert(started && "error: input propagated for inactive process");
+
+            // write any queued stdinput
+            while (!stdinput_queue.empty()) {
+                this->write(stdinput_queue.front());
+                stdinput_queue.pop_front();
+
+                pump_output();
+            }
+
+            // each of the input files to this process has to be pumped too
+            for (std::ifstream* ifile : feedin_files) {
+                // write as many lines from the input file until we run out
+                for (std::string line; std::getline(*ifile, line); ) {
+                    // we gotta append a newline, getline omits it.
+                    this->write(line + "\n");
+                    pump_output();
+                }
+            }
+        }
+
+        void pump_output() {
+            assert(started && "error: input propagated for inactive process");
+
+            while (owned_proc.isReady()) {
+                std::string out = owned_proc.readLine();
+
+                std::cout << "read line " << out << std::endl;
+
+                this->write_next(out);
+            }
+        }
+
+        void write_next(const std::string& out) {
+
+            std::cout << "writing line:" << out << std::endl;
+
+            // TODO: call functor
+
+            for (Process* succ_process : successor_processes) {
+                succ_process->write(out);
+            }
+            for (std::ofstream* succ_file : feedout_files) {
+                std::cout << "writing to file:" << out;
+                (*succ_file) << out << std::flush;
+            }
+        }
+
 
     public:
         template<typename Functor = std::function<void(std::string)>>
-            ProcessStream(const std::string& commandPath, const std::vector<std::string>& commandArgs, const Functor& func = [](std::string){});
+            Process(const std::string& commandPath, const std::vector<std::string>& commandArgs, const Functor& func = [](std::string){}) : 
+                owned_proc(commandPath, commandArgs.begin(), commandArgs.end(), internal::dummyVec.begin(), internal::dummyVec.end()) {
+            }
 
-        ~ProcessStream();
+        ~Process() {
+            pump_input();
+            pump_output();
+            owned_proc.sendEOF();
+            pump_output();
+
+            // iterate over each line of remaining output by the child's stdout, and call the functor
+            std::string processOutput;
+            while ((processOutput = owned_proc.readLine()).size() > 0) {
+                this->write_next(processOutput);
+                //lambda(processOutput);
+            }
+
+            int retval = owned_proc.waitUntilFinished();
+            std::cout << "process retval:" << retval;
+
+            // TODO: is this right?
+            for (Process* succ_process : successor_processes) {
+                succ_process->owned_proc.waitUntilFinished();
+            }
+            for (std::ofstream* succ_file : feedout_files) {
+                succ_file->close();
+            }
+
+            // TODO: invoke exit for successor processes?
+        }
 
         // start the process and prevent any more pipes from being established.
         // may throw an exception?
-        bool start();
+        void start() {
+            if (started) throw std::runtime_error("cannot start an already running process");
+            owned_proc.start();
+            started = true; 
+
+            // recursively start all successor processes
+            for (auto successor_proc : successor_processes) {
+                successor_proc->start();
+            }
+
+            pump_input();
+
+            // close the stdin for the process
+            // XXX: do we want to do this, or only when the process is finished - i.e. dtor'd or .close()'d, etc.
+            // owned_proc.sendEOF();
+
+            // propagate output some more
+            pump_output();
+        }
+
+        bool is_started() { return started; }
 
         // write a line to the subprocess's stdin
-        void write(const std::string& inputLine);
+        void write(const std::string& inputLine) {
+            owned_proc.write(inputLine);
+        }
         // read a line and block until received (or until timeout reached)
         template<typename Rep>
             std::string read(std::chrono::duration<Rep> timeout=-1);
@@ -541,17 +657,25 @@ class ProcessStream {
         // if a process is receiving from another process, then they cannot use operator<< anymore
         //      hmm: what about if its done before .start()?
         // if a process is outputting to another, they cannot use operator>> 
-        ProcessStream& pipe_to(ProcessStream& receiver);
+        Process& pipe_to(Process& receiver) {
+            successor_processes.push_back(&receiver);
+            return receiver;
+        }
         // ditto
-        ProcessStream& operator>>(ProcessStream& receiver);
+        Process& operator>>(Process& receiver) { return this->pipe_to(receiver); }
+        // for files
+        std::ofstream& pipe_to(std::ofstream& receiver) {
+            feedout_files.push_back(&receiver);
+            return receiver;
+        }
 
         // read a line into this process (so it acts as another line of stdin)
         // instead of string, probably should be typename Stringable, and use stringstream and stuff.
-        ProcessStream& operator<<(const std::string& inputLine);
+        Process& operator<<(const std::string& inputLine);
         // retrieve a line of stdout from this process
-        ProcessStream& operator>>(std::string& outputLine);
+        Process& operator>>(std::string& outputLine);
         // write all stdout to file?
-        ProcessStream& operator>>(std::ofstream& outfile);
+        Process& operator>>(std::ofstream& outfile);
 
         // some other functions which maybe useful (perhaps take a timeout?)
         // returns whether it could terminate
