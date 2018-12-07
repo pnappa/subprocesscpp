@@ -276,7 +276,8 @@ class Process {
         // the process name must be first for execv
         // charArrayPlex.push_back(const_cast<char*>(input.c_str()));
         for (auto it = begin; it != end; ++it) {
-            charArrayPlex.push_back(const_cast<char*>((*it).c_str()));
+            charArrayPlex.push_back(strdup((*it).c_str()));
+            //charArrayPlex.push_back(const_cast<char*>((*it).c_str()));
         }
         // must be terminated with a nullptr for execv
         charArrayPlex.push_back(nullptr);
@@ -294,10 +295,16 @@ public:
         // generate a vector that is able to be passed into exec for the process arguments
         processArgs = toNullTerminatedCharIterable(argBegin, argEnd);
         // process args must start with the processes name
-        processArgs.insert(processArgs.begin(), const_cast<char*>(commandPath.c_str()));
+        processArgs.insert(processArgs.begin(), strdup(commandPath.c_str()));
 
         // ditto for the env variables
         envVariables = toNullTerminatedCharIterable(envBegin, envEnd);
+    }
+
+    ~Process() {
+        // clean these up because they're created via strdup
+        for (char* c : processArgs) free(c);
+        for (char* c : envVariables) free(c);
     }
 
     /**
@@ -597,13 +604,11 @@ class Process {
             // as if they're already closed, they're a no-op.
             for (Process* pred_process : predecessor_processes) {
                 pred_process->finish();
-                
             }
 
             this->owned_proc.sendEOF();
             // process any remaining input/output
             finish();
-
 
             // TODO: is this right?
             for (Process* succ_process : successor_processes) {

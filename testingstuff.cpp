@@ -5,12 +5,11 @@
 int main() {
     subprocess::Process p("/bin/echo", {"asjdlksaj"});
     p.output_to_file("cool.out");
-    subprocess::Process p2("/bin/grep", {"asj"});
+    subprocess::Process p2("/bin/grep", {"-o", "asj"});
     p2.output_to_file("nekcool.out");
     p.pipe_to(p2);
     p.start();
 }
-
 
 
 
