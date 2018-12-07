@@ -524,10 +524,15 @@ class Process {
         // need some list of processes this process is supposed to pipe to (if any)
         // XXX: what if the child processes are moved? should we keep a reference to the parent(s) then update us within their vector..?
         std::vector<Process*> successor_processes;
+        std::vector<Process*> predecessor_processes;
         // TODO: how should we handle this..?
         // std::vector<std::ifstream> feedin_files;
         std::vector<std::ofstream> feedout_files;
+        // the function to call every time a line is output
+        // Functor func;
         bool started = false;
+        bool finished = false;
+        int retval;
 
         internal::Process owned_proc;
 
@@ -562,66 +567,54 @@ class Process {
             while (owned_proc.isReady()) {
                 std::string out = owned_proc.readLine();
 
-                std::cout << "read line " << out << std::endl;
-
                 this->write_next(out);
             }
         }
 
         void write_next(const std::string& out) {
 
-            std::cout << "writing line:" << out << std::endl;
-
-            // TODO: call functor
+            // call functor
+            // func(out);
 
             for (Process* succ_process : successor_processes) {
                 succ_process->write(out);
             }
+            // TODO: should I throw if cannot write to file..?
             for (std::ofstream& succ_file : feedout_files) {
-                std::cout << "writing to file:" << out;
-                if (!succ_file) std::cout << "uh, can't write to file..?\n";
-                std::cout << strerror(errno) << '\n';
                 succ_file << out << std::flush;
-                std::cout << "isbad" << succ_file.bad() << std::endl;
-                std::cout << "isfail" << succ_file.fail() << std::endl;
-                std::cout << "iseof" << succ_file.eof() << std::endl;
-                std::cout << strerror(errno) << '\n';
-                if (!succ_file) std::cout << "uh, can't write to file..? 2\n";
-                std::cout << strerror(errno) << '\n';
             }
         }
 
     public:
-        template<class ArgIterable = std::vector<std::string>, typename Functor = std::function<void(std::string)>>
-            Process(const std::string& commandPath, const ArgIterable& commandArgs, const Functor& func = [](std::string){}) : 
+        template<class ArgIterable = std::vector<std::string>, class Functor = std::function<void(std::string)>>
+            Process(const std::string& commandPath, const ArgIterable& commandArgs, Functor func = [](std::string){}) : 
                 owned_proc(commandPath, commandArgs.begin(), commandArgs.end(), internal::dummyVec.begin(), internal::dummyVec.end()) {
             }
 
         ~Process() {
-            pump_input();
-            pump_output();
-            owned_proc.sendEOF();
-            pump_output();
-
-            // iterate over each line of remaining output by the child's stdout, and call the functor
-            std::string processOutput;
-            while ((processOutput = owned_proc.readLine()).size() > 0) {
-                this->write_next(processOutput);
+            // err need to close all predecessors (if any)
+            // if there is a cycle in the processes, this doesn't cause an infinite loop
+            // as if they're already closed, they're a no-op.
+            for (Process* pred_process : predecessor_processes) {
+                pred_process->finish();
+                
             }
 
-            int retval = owned_proc.waitUntilFinished();
-            std::cout << "process retval:" << retval;
+            this->owned_proc.sendEOF();
+            // process any remaining input/output
+            finish();
+
 
             // TODO: is this right?
             for (Process* succ_process : successor_processes) {
-                succ_process->owned_proc.waitUntilFinished();
-            }
-            for (std::ofstream& succ_file : feedout_files) {
-                if (!succ_file) std::cout << "some error with file..?\n";
-                succ_file.close();
+                succ_process->finish();
             }
 
-            // TODO: invoke exit for successor processes?
+            // according to docs, this is not necessary, this'll happen in the dtor
+            // for (std::ofstream& succ_file : feedout_files) {
+            //     if (!succ_file) std::cout << "some error with file..?\n";
+            //     succ_file.close();
+            // }
         }
 
         // start the process and prevent any more pipes from being established.
@@ -636,17 +629,14 @@ class Process {
                 successor_proc->start();
             }
 
+            // push out any pending input
             pump_input();
-
-            // close the stdin for the process
-            // XXX: do we want to do this, or only when the process is finished - i.e. dtor'd or .close()'d, etc.
-            // owned_proc.sendEOF();
-
             // propagate output some more
             pump_output();
         }
 
-        int finish () {
+        int finish() {
+            if (finished) return this->retval;
             pump_input();
             pump_output();
             pump_output();
@@ -657,9 +647,10 @@ class Process {
                 this->write_next(processOutput);
             }
 
-            int retval = owned_proc.waitUntilFinished();
+            this->retval = owned_proc.waitUntilFinished();
+            finished = true;
 
-            return retval;
+            return this->retval;
         }
 
         bool is_started() { return started; }
@@ -683,6 +674,7 @@ class Process {
         // if a process is outputting to another, they cannot use operator>> 
         Process& pipe_to(Process& receiver) {
             successor_processes.push_back(&receiver);
+            receiver.predecessor_processes.push_back(this);
             return receiver;
         }
         // ditto
@@ -696,6 +688,11 @@ class Process {
         void output_to_file(const std::string& filename) {
             feedout_files.push_back(std::ofstream(filename));
             if (!feedout_files.back().good()) throw std::runtime_error("error: file " + filename + " failed to open");
+        }
+
+        void output_to_file(std::ofstream&& file) {
+            feedout_files.push_back(std::move(file));
+            if (!feedout_files.back().good()) throw std::runtime_error("error: file is invalid");
         }
 
         // read a line into this process (so it acts as another line of stdin)
