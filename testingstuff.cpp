@@ -3,10 +3,7 @@
 #include <fstream>
 
 int main() {
-    subprocess::Process p("/bin/echo", {"lol"});
-    std::ofstream outfile("cool.out");
-
-    p.pipe_to(outfile);
-
+    subprocess::Process p("/bin/echo", {"asjdlksaj"});
+    p.output_to_file("cool.out");
     p.start();
 }

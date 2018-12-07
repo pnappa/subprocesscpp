@@ -524,8 +524,9 @@ class Process {
         // need some list of processes this process is supposed to pipe to (if any)
         // XXX: what if the child processes are moved? should we keep a reference to the parent(s) then update us within their vector..?
         std::vector<Process*> successor_processes;
-        std::vector<std::ifstream*> feedin_files;
-        std::vector<std::ofstream*> feedout_files;
+        // TODO: how should we handle this..?
+        // std::vector<std::ifstream> feedin_files;
+        std::vector<std::ofstream> feedout_files;
         bool started = false;
 
         internal::Process owned_proc;
@@ -545,14 +546,14 @@ class Process {
             }
 
             // each of the input files to this process has to be pumped too
-            for (std::ifstream* ifile : feedin_files) {
-                // write as many lines from the input file until we run out
-                for (std::string line; std::getline(*ifile, line); ) {
-                    // we gotta append a newline, getline omits it.
-                    this->write(line + "\n");
-                    pump_output();
-                }
-            }
+            // for (std::ifstream* ifile : feedin_files) {
+            //     // write as many lines from the input file until we run out
+            //     for (std::string line; std::getline(*ifile, line); ) {
+            //         // we gotta append a newline, getline omits it.
+            //         this->write(line + "\n");
+            //         pump_output();
+            //     }
+            // }
         }
 
         void pump_output() {
@@ -576,16 +577,23 @@ class Process {
             for (Process* succ_process : successor_processes) {
                 succ_process->write(out);
             }
-            for (std::ofstream* succ_file : feedout_files) {
+            for (std::ofstream& succ_file : feedout_files) {
                 std::cout << "writing to file:" << out;
-                (*succ_file) << out << std::flush;
+                if (!succ_file) std::cout << "uh, can't write to file..?\n";
+                std::cout << strerror(errno) << '\n';
+                succ_file << out << std::flush;
+                std::cout << "isbad" << succ_file.bad() << std::endl;
+                std::cout << "isfail" << succ_file.fail() << std::endl;
+                std::cout << "iseof" << succ_file.eof() << std::endl;
+                std::cout << strerror(errno) << '\n';
+                if (!succ_file) std::cout << "uh, can't write to file..? 2\n";
+                std::cout << strerror(errno) << '\n';
             }
         }
 
-
     public:
-        template<typename Functor = std::function<void(std::string)>>
-            Process(const std::string& commandPath, const std::vector<std::string>& commandArgs, const Functor& func = [](std::string){}) : 
+        template<class ArgIterable = std::vector<std::string>, typename Functor = std::function<void(std::string)>>
+            Process(const std::string& commandPath, const ArgIterable& commandArgs, const Functor& func = [](std::string){}) : 
                 owned_proc(commandPath, commandArgs.begin(), commandArgs.end(), internal::dummyVec.begin(), internal::dummyVec.end()) {
             }
 
@@ -599,7 +607,6 @@ class Process {
             std::string processOutput;
             while ((processOutput = owned_proc.readLine()).size() > 0) {
                 this->write_next(processOutput);
-                //lambda(processOutput);
             }
 
             int retval = owned_proc.waitUntilFinished();
@@ -609,8 +616,9 @@ class Process {
             for (Process* succ_process : successor_processes) {
                 succ_process->owned_proc.waitUntilFinished();
             }
-            for (std::ofstream* succ_file : feedout_files) {
-                succ_file->close();
+            for (std::ofstream& succ_file : feedout_files) {
+                if (!succ_file) std::cout << "some error with file..?\n";
+                succ_file.close();
             }
 
             // TODO: invoke exit for successor processes?
@@ -638,6 +646,22 @@ class Process {
             pump_output();
         }
 
+        int finish () {
+            pump_input();
+            pump_output();
+            pump_output();
+            
+            // iterate over each line of remaining output by the child's stdout, and call the functor
+            std::string processOutput;
+            while ((processOutput = owned_proc.readLine()).size() > 0) {
+                this->write_next(processOutput);
+            }
+
+            int retval = owned_proc.waitUntilFinished();
+
+            return retval;
+        }
+
         bool is_started() { return started; }
 
         // write a line to the subprocess's stdin
@@ -663,19 +687,24 @@ class Process {
         }
         // ditto
         Process& operator>>(Process& receiver) { return this->pipe_to(receiver); }
+        // XXX: removed this because the dtor wasn't handled well
         // for files
-        std::ofstream& pipe_to(std::ofstream& receiver) {
-            feedout_files.push_back(&receiver);
-            return receiver;
+        // std::ofstream& pipe_to(std::ofstream& receiver) {
+        //     feedout_files.push_back(&receiver);
+        //     return receiver;
+        // }
+        void output_to_file(const std::string& filename) {
+            feedout_files.push_back(std::ofstream(filename));
+            if (!feedout_files.back().good()) throw std::runtime_error("error: file " + filename + " failed to open");
         }
 
         // read a line into this process (so it acts as another line of stdin)
         // instead of string, probably should be typename Stringable, and use stringstream and stuff.
-        Process& operator<<(const std::string& inputLine);
+        //Process& operator<<(const std::string& inputLine);
         // retrieve a line of stdout from this process
-        Process& operator>>(std::string& outputLine);
+        //Process& operator>>(std::string& outputLine);
         // write all stdout to file?
-        Process& operator>>(std::ofstream& outfile);
+        // Process& operator>>(std::ofstream& outfile);
 
         // some other functions which maybe useful (perhaps take a timeout?)
         // returns whether it could terminate
