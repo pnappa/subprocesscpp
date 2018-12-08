@@ -433,11 +433,6 @@ int execute(const std::string& commandPath, ArgIt firstArg, ArgIt lastArg,
     internal::Process childProcess(commandPath, firstArg, lastArg, envBegin, envEnd);
     childProcess.start();
 
-    // TODO: fix this so we can't block the input/output pipe. it should only require
-    // reading from the process so-as to unclog their pipe. Pipes only have finite space! (~65k)
-    // but remember, we may need to read more than one line per for loop (if a process outputs a lot of lines
-    // per line read in, perhaps..?)
-
     // write our input to the processes stdin pipe
     for (auto it = stdinBegin; it != stdinEnd; ++it) {
         childProcess.write(*it);
@@ -447,6 +442,7 @@ int execute(const std::string& commandPath, ArgIt firstArg, ArgIt lastArg,
             lambda(childProcess.readLine());
         }
     }
+
     // close the stdin for the process
     childProcess.sendEOF();
 
@@ -501,6 +497,7 @@ std::vector<std::string> check_output(const std::string& commandPath, ArgIt firs
         StdinIt stdinBegin = internal::dummyVec.begin(), StdinIt stdinEnd = internal::dummyVec.end(),
         EnvIt envBegin = internal::dummyVec.begin(), EnvIt envEnd = internal::dummyVec.end()) {
     std::vector<std::string> retVec;
+    // XXX: what's a good way to return the return value, do we throw on non-zero return?
     // int status = execute(commandPath, firstArg, lastArg, stdinBegin, stdinEnd, [&](std::string s) {
     // retVec.push_back(std::move(s)); }, envBegin, envEnd);
     execute(commandPath, firstArg, lastArg, stdinBegin, stdinEnd,
@@ -536,10 +533,15 @@ class Process {
         // std::vector<std::ifstream> feedin_files;
         std::vector<std::ofstream> feedout_files;
         // the function to call every time a line is output
-        // Functor func;
+        // TODO: somehow make it use the ctor template type
+        std::function<void(std::string)> func;
+
         bool started = false;
         bool finished = false;
         int retval;
+        
+        mutable size_t lines_written = 0;
+        mutable size_t lines_received = 0;
 
         internal::Process owned_proc;
 
@@ -553,7 +555,6 @@ class Process {
             while (!stdinput_queue.empty()) {
                 this->write(stdinput_queue.front());
                 stdinput_queue.pop_front();
-
                 pump_output();
             }
 
@@ -572,6 +573,7 @@ class Process {
             assert(started && "error: input propagated for inactive process");
 
             while (owned_proc.isReady()) {
+                lines_written++;
                 std::string out = owned_proc.readLine();
 
                 this->write_next(out);
@@ -579,9 +581,10 @@ class Process {
         }
 
         void write_next(const std::string& out) {
+            assert(started && "error: input propagated for inactive process");
 
             // call functor
-            // func(out);
+            func(out);
 
             for (Process* succ_process : successor_processes) {
                 succ_process->write(out);
@@ -593,13 +596,14 @@ class Process {
         }
 
     public:
-        template<class ArgIterable = std::vector<std::string>, class Functor = std::function<void(std::string)>>
-            Process(const std::string& commandPath, const ArgIterable& commandArgs, Functor func = [](std::string){}) : 
+        template<class ArgIterable = decltype(internal::dummyVec), class Functor = std::function<void(std::string)>>
+            Process(const std::string& commandPath, const ArgIterable& commandArgs = internal::dummyVec, Functor func = [](std::string){}) : 
+                func(func),
                 owned_proc(commandPath, commandArgs.begin(), commandArgs.end(), internal::dummyVec.begin(), internal::dummyVec.end()) {
             }
 
         ~Process() {
-            // err need to close all predecessors (if any)
+            // err, need to close all predecessors (if any)
             // if there is a cycle in the processes, this doesn't cause an infinite loop
             // as if they're already closed, they're a no-op.
             for (Process* pred_process : predecessor_processes) {
@@ -610,25 +614,26 @@ class Process {
             // process any remaining input/output
             finish();
 
-            // TODO: is this right?
+            // do the same for outputting processes
             for (Process* succ_process : successor_processes) {
                 succ_process->finish();
             }
-
-            // according to docs, this is not necessary, this'll happen in the dtor
-            // for (std::ofstream& succ_file : feedout_files) {
-            //     if (!succ_file) std::cout << "some error with file..?\n";
-            //     succ_file.close();
-            // }
         }
 
         // start the process and prevent any more pipes from being established.
         // may throw an exception?
         void start() {
-            if (started) throw std::runtime_error("cannot start an already running process");
+            // ignore an already started process
+            if (started) return;
             owned_proc.start();
             started = true; 
 
+            // recursively start all predecessor processes
+            // do this to ensure that 
+            for (auto pred_process : predecessor_processes) {
+                pred_process->start();
+            }
+            
             // recursively start all successor processes
             for (auto successor_proc : successor_processes) {
                 successor_proc->start();
@@ -644,12 +649,12 @@ class Process {
             if (finished) return this->retval;
             pump_input();
             pump_output();
-            pump_output();
             
             // iterate over each line of remaining output by the child's stdout, and call the functor
             std::string processOutput;
             while ((processOutput = owned_proc.readLine()).size() > 0) {
                 this->write_next(processOutput);
+                lines_written++;
             }
 
             this->retval = owned_proc.waitUntilFinished();
@@ -662,8 +667,21 @@ class Process {
 
         // write a line to the subprocess's stdin
         void write(const std::string& inputLine) {
-            owned_proc.write(inputLine);
+            if (finished) throw std::runtime_error("cannot write to a finished process");
+
+            if (is_started()) {
+                this->lines_written++;
+
+                owned_proc.write(inputLine);
+
+                pump_output();
+
+            // if it hasn't been started, then we queue up the input for later
+            } else {
+                stdinput_queue.push_front(inputLine);
+            }
         }
+
         // read a line and block until received (or until timeout reached)
         template<typename Rep>
             std::string read(std::chrono::duration<Rep> timeout=-1);
@@ -695,14 +713,18 @@ class Process {
             if (!feedout_files.back().good()) throw std::runtime_error("error: file " + filename + " failed to open");
         }
 
-        void output_to_file(std::ofstream&& file) {
-            feedout_files.push_back(std::move(file));
-            if (!feedout_files.back().good()) throw std::runtime_error("error: file is invalid");
-        }
+        // can't seem to get this one working..?
+        //void output_to_file(std::ofstream&& file) {
+        //    feedout_files.push_back(std::move(file));
+        //    if (!feedout_files.back().good()) throw std::runtime_error("error: file is invalid");
+        //}
 
         // read a line into this process (so it acts as another line of stdin)
         // instead of string, probably should be typename Stringable, and use stringstream and stuff.
-        //Process& operator<<(const std::string& inputLine);
+        Process& operator<<(const std::string& inputLine) {
+            this->write(inputLine);
+            return *this;
+        }
         // retrieve a line of stdout from this process
         //Process& operator>>(std::string& outputLine);
         // write all stdout to file?

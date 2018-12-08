@@ -1,1 +1,3 @@
 print_env
+tee_if_nonprime
+increment
