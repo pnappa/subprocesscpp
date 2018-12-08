@@ -545,16 +545,17 @@ class Process {
 
         internal::Process owned_proc;
 
-        std::deque<std::string> stdinput_queue;
+        std::deque<std::string> stdin_queue;
+        std::deque<std::string> stdout_queue;
     protected:
 
         void pump_input() {
             assert(started && "error: input propagated for inactive process");
 
             // write any queued stdinput
-            while (!stdinput_queue.empty()) {
-                this->write(stdinput_queue.front());
-                stdinput_queue.pop_front();
+            while (!stdin_queue.empty()) {
+                this->write(stdin_queue.front());
+                stdin_queue.pop_front();
                 pump_output();
             }
 
@@ -582,13 +583,19 @@ class Process {
 
         void write_next(const std::string& out) {
             assert(started && "error: input propagated for inactive process");
-
+            
             // call functor
             func(out);
+
+            // TODO: check this, but I save it for later reads.
+            if (successor_processes.empty() && feedout_files.empty()) {
+                stdout_queue.push_back(out);
+            }
 
             for (Process* succ_process : successor_processes) {
                 succ_process->write(out);
             }
+
             // TODO: should I throw if cannot write to file..?
             for (std::ofstream& succ_file : feedout_files) {
                 succ_file << out << std::flush;
@@ -678,7 +685,7 @@ class Process {
 
             // if it hasn't been started, then we queue up the input for later
             } else {
-                stdinput_queue.push_front(inputLine);
+                stdin_queue.push_front(inputLine);
             }
         }
 
@@ -709,7 +716,7 @@ class Process {
         //     return receiver;
         // }
         void output_to_file(const std::string& filename) {
-            feedout_files.push_back(std::ofstream(filename));
+            feedout_files.push_back(std::move(std::ofstream(filename)));
             if (!feedout_files.back().good()) throw std::runtime_error("error: file " + filename + " failed to open");
         }
 
@@ -725,8 +732,40 @@ class Process {
             this->write(inputLine);
             return *this;
         }
-        // retrieve a line of stdout from this process
-        //Process& operator>>(std::string& outputLine);
+
+        // retrieve a line of stdout from this process (blocking)
+        Process& operator>>(std::string& outputLine) {
+            if (!started || finished) {
+                throw std::runtime_error("cannot read line from inactive process");
+            }
+
+            if (successor_processes.size() > 0 || feedout_files.size() > 0) {
+                throw std::runtime_error("manually reading line from process that is piped from is prohibited");
+            }
+
+            lines_written++;
+
+            if (!stdout_queue.empty()) {
+                outputLine = stdout_queue.front();
+                stdout_queue.pop_front();
+            } else {
+                outputLine = owned_proc.readLine();
+            }
+            
+            // TODO: i think its possible we miss some lines, if a process pipes to this one, this fn isn't called
+            //          We might need to save lines from those instances, and yield from them when necessary.?
+            //          We have to save them rather than leaving them in the pipe as otherwise blockages may occur
+
+            // call functor XXX: this will get called twice for processes that get piped to...
+            // so.. where do we call this..?
+            // hmm... perhaps the write fn should instead call this operator...or vice versa and shuffle code.
+            func(outputLine);
+
+            // no need to output to the successors (they can't exist when using this fn)
+            
+            return *this;
+        }
+
         // write all stdout to file?
         // Process& operator>>(std::ofstream& outfile);
 

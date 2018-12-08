@@ -15,6 +15,7 @@
  *          so we can ensure these are all available across all systems.
  *  - TODO: add some more tests about lots of output generated for little inputs
  *  - TODO: add some tests which will fill up the pipe fully (https://unix.stackexchange.com/questions/11946/how-big-is-the-pipe-buffer)
+ *  - TODO: should a process be started in the dtor if it hasn't already been..?
  */
 
 TEST_CASE("[iterable] basic echo execution", "[subprocess::execute]") {
@@ -293,6 +294,191 @@ TEST_CASE("[iterator] check_output permutations (varargs)", "[subprocess::check_
     REQUIRE(out.size() == output_expected.size());
     REQUIRE(out == output_expected);
 }
+
+
+// TODO: make all these have timeouts! it's possible that they never terminate
+// TODO: somehow ensure that if we try and retrieve more output it fails..? idk, seems annoying
+//       perhaps we just use the timeouts, with some reasonable duration..?
+
+TEST_CASE("basic process instantiation", "[subprocess::Process]") {
+    subprocess::Process p("/bin/echo", {"henlo world"});
+
+    p.start();
+    std::string line;
+    p >> line;
+
+    REQUIRE(line == "henlo world\n");
+}
+
+// handy deferrable functions (executed on dtor)
+template <typename Functor>
+struct Deferrable {
+    Functor func;
+    Deferrable(Functor f) : func(f) {}
+    ~Deferrable() {
+        func();
+    }
+};
+
+TEST_CASE("process functor", "[subprocess::Process]") {
+
+    // requirement from the dead 
+    // just ensure that even after the dtor, the functor isn't invoked again!
+    std::string line;
+    size_t func_count = 0;
+    auto deferred_assertion = Deferrable<std::function<void()>>([&]() {
+        REQUIRE(func_count == 1);
+    });
+
+    subprocess::Process p("/bin/echo", {"henlo world"}, [&](std::string s) {
+        func_count += 1;
+        REQUIRE(s == "henlo world\n");
+            });
+
+    p.start();
+    p >> line;
+
+    REQUIRE(line == "henlo world\n");
+    REQUIRE(func_count == 1);
+}
+
+TEST_CASE("pre-emptive process input", "[subprocess::Process]") {
+    subprocess::Process p("/bin/cat");
+
+    p << "henlo world\n";
+    p.start();
+
+    std::string line;
+    p >> line;
+
+    REQUIRE(line == "henlo world\n");
+}
+
+TEST_CASE("post process start input", "[subprocess::Process]") {
+    subprocess::Process p("/bin/cat");
+
+    p.start();
+
+    p << "henlo world\n";
+
+    std::string line;
+    p >> line;
+
+    REQUIRE(line == "henlo world\n");
+}
+
+TEST_CASE("reading from process that itself is a successor proc", "[subprocess::Process]") {
+    // TODO: add timeout
+    subprocess::Process p1("/bin/echo", {"high to roam"});
+    subprocess::Process p2("/bin/grep", {"-o", "hi"});
+
+    p1.pipe_to(p2);
+    
+    p1.start();
+
+    std::string line;
+    // XXX: this line is currently making the test hang. The reason is simple, but the implications are complex.
+    // When reading from p2, there isn't a line instantly available, as it requires input from p1 
+    //  - but we don't currently call readline in the predecessor. If we do, what if the current
+    //  process *will* output, but is taking a while..?
+    p2 >> line;
+
+    REQUIRE(line == "hi\n");
+}
+
+TEST_CASE("malordered process RAII", "[subprocess::Process]") {
+    bool func_called = false;
+    auto deferred_assertion = Deferrable<std::function<void()>>([&]() {
+        REQUIRE(func_called == true);
+    });
+    // test that initialising the processes in the reverse stack order won't bork them
+    subprocess::Process p2("/bin/grep", {"-o", "hi"}, [&](std::string s) {
+            REQUIRE(s == "hi\n");
+            func_called = true;
+            });
+    subprocess::Process p1("/bin/echo", {"high to roam"});
+
+    p1.pipe_to(p2);
+
+    p1.start();
+}
+
+TEST_CASE("RAII doesn't start non-started process", "[subprocess:Process]") {
+    subprocess::Process p1("/bin/echo", {"die bart die"}, [&](std::string) {
+            FAIL("process output when shouldn't have");
+            });
+}
+
+TEST_CASE("superfluous input", "[subprocess::Process]") {
+    // provide input to a process that won't use it.
+}
+
+TEST_CASE("", "[subprocess::Process]") {
+
+}
+
+TEST_CASE("reading from succesor plus functor", "[subprocess::Process]") {
+
+}
+
+TEST_CASE("multi-line output", "[subprocess::Process]") {
+    // test a process that outputs lots of output for each line of stdin
+
+}
+
+TEST_CASE("post-start manual process input", "[subprocess::Process]") {
+
+}
+
+TEST_CASE("simple process piping", "[subprocess::Process]") {
+
+}
+
+TEST_CASE("piping to file", "[subprocess::Process]") {
+
+}
+
+TEST_CASE("bifurcated file outputting", "[subprocess::Process]") {
+
+}
+
+TEST_CASE("long pipe chain", "[subprocess::Process]") {
+
+}
+
+TEST_CASE("complex process piping", "[subprocess::Process]") {
+
+}
+
+TEST_CASE("cyclic process piping", "[subprocess::Process]") {
+    // TODO: fail if this takes too long, that indicates there's a problem 
+    // probably will be the next prime implementation
+}
+
+TEST_CASE("test infinite output cropped via head unix pipe", "[subprocess::Process]") {
+
+}
+
+TEST_CASE("", "[subprocess::Process]") {
+
+}
+
+TEST_CASE("", "[subprocess::Process]") {
+
+}
+
+TEST_CASE("", "[subprocess::Process]") {
+
+}
+
+TEST_CASE("test output iterator", "[subprocess::Process]") {
+
+}
+
+TEST_CASE("test ctor vargs", "[subprocess::Process]") {
+
+}
+
 
 /* tests pending API update */
 // TEST_CASE("asynchronous is actually asynchronous", "[subprocess::async]") {

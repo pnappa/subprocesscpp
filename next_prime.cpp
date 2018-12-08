@@ -17,7 +17,5 @@ int main() {
 
     incrementer.start();
     incrementer << "33\n";
-
-    prime_checker.finish();
 }
 
