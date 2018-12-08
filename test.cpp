@@ -299,6 +299,7 @@ TEST_CASE("[iterator] check_output permutations (varargs)", "[subprocess::check_
 // TODO: make all these have timeouts! it's possible that they never terminate
 // TODO: somehow ensure that if we try and retrieve more output it fails..? idk, seems annoying
 //       perhaps we just use the timeouts, with some reasonable duration..?
+// TODO: replace these tests as I made having the functor AND being able to extract stdout illegal
 
 TEST_CASE("basic process instantiation", "[subprocess::Process]") {
     subprocess::Process p("/bin/echo", {"henlo world"});

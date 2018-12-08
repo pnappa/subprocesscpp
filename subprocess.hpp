@@ -85,7 +85,7 @@ private:
      * */
     short inPipeState(long wait_ms) {
         // file descriptor struct to check if pollin bit will be set
-        struct pollfd fds = {.fd = input_pipe_file_descriptor[0], .events = POLLIN};
+        struct pollfd fds = {input_pipe_file_descriptor[0], POLLIN, 0};
         // poll with no wait time
         int res = poll(&fds, 1, wait_ms);
 
@@ -530,11 +530,13 @@ class Process {
         std::vector<Process*> successor_processes;
         std::vector<Process*> predecessor_processes;
         // TODO: how should we handle this..?
+        //  The reason why its not trivial is that we may want to have a file pipe to multiple processes, and it feels
+        //  like a waste to read from the file N times to output to N processes.
         // std::vector<std::ifstream> feedin_files;
         std::vector<std::ofstream> feedout_files;
         // the function to call every time a line is output
         // TODO: somehow make it use the ctor template type
-        std::function<void(std::string)> func;
+        std::function<void(std::string)>* func = nullptr;
 
         bool started = false;
         bool finished = false;
@@ -571,7 +573,7 @@ class Process {
         }
 
         void pump_output() {
-            assert(started && "error: input propagated for inactive process");
+            assert(started && "error: output propagated for inactive process");
 
             while (owned_proc.isReady()) {
                 lines_written++;
@@ -583,30 +585,31 @@ class Process {
 
         void write_next(const std::string& out) {
             assert(started && "error: input propagated for inactive process");
-            
-            // call functor
-            func(out);
 
-            // TODO: check this, but I save it for later reads.
-            if (successor_processes.empty() && feedout_files.empty()) {
+            // hold onto stdout if we don't have any successors or lambdas to execute
+            if (successor_processes.empty() && feedout_files.empty() && func == nullptr) {
                 stdout_queue.push_back(out);
-            }
+            } else {
+                // call functor
+                (*func)(out);
 
-            for (Process* succ_process : successor_processes) {
-                succ_process->write(out);
-            }
+                for (Process* succ_process : successor_processes) {
+                    succ_process->write(out);
+                }
 
-            // TODO: should I throw if cannot write to file..?
-            for (std::ofstream& succ_file : feedout_files) {
-                succ_file << out << std::flush;
+                // TODO: should I throw if cannot write to file..?
+                for (std::ofstream& succ_file : feedout_files) {
+                    succ_file << out << std::flush;
+                }
             }
         }
 
     public:
         template<class ArgIterable = decltype(internal::dummyVec), class Functor = std::function<void(std::string)>>
             Process(const std::string& commandPath, const ArgIterable& commandArgs = internal::dummyVec, Functor func = [](std::string){}) : 
-                func(func),
                 owned_proc(commandPath, commandArgs.begin(), commandArgs.end(), internal::dummyVec.begin(), internal::dummyVec.end()) {
+                    // TODO: change back to new Functor(func), when I'm able to set the member variables type in the ctor.
+                    this->func = new std::function<void(std::string)>(func);
             }
 
         ~Process() {
@@ -625,6 +628,9 @@ class Process {
             for (Process* succ_process : successor_processes) {
                 succ_process->finish();
             }
+
+            // our function is dynamically allocated (how else do we test for null functors..?)
+            delete func;
         }
 
         // start the process and prevent any more pipes from being established.
@@ -632,6 +638,7 @@ class Process {
         void start() {
             // ignore an already started process
             if (started) return;
+
             owned_proc.start();
             started = true; 
 
@@ -670,7 +677,7 @@ class Process {
             return this->retval;
         }
 
-        bool is_started() { return started; }
+        bool is_started() const { return started; }
 
         // write a line to the subprocess's stdin
         void write(const std::string& inputLine) {
@@ -690,11 +697,35 @@ class Process {
         }
 
         // read a line and block until received (or until timeout reached)
-        template<typename Rep>
-            std::string read(std::chrono::duration<Rep> timeout=-1);
+        template <typename Rep = long>
+            std::string read(std::chrono::duration<Rep> timeout = std::chrono::duration<Rep>(-1)){
+                std::string outputLine;
+
+                if (!started || finished) {
+                    throw std::runtime_error("cannot read line from inactive process");
+                }
+
+                if (successor_processes.size() > 0 || feedout_files.size() > 0 || func != nullptr) {
+                    throw std::runtime_error("manually reading line from process that is piped from/has a functor is prohibited");
+                }
+
+                lines_written++;
+
+                // we may have lines of output to "use" from earlier
+                if (!stdout_queue.empty()) {
+                    outputLine = stdout_queue.front();
+                    stdout_queue.pop_front();
+                } else {
+                    outputLine = owned_proc.readLine(timeout);
+                }
+
+                return outputLine;
+            }
         // if there is a line for reading (optionally 
-        template<typename Rep>
-            bool ready(std::chrono::duration<Rep> timeout=0);
+        template <typename Rep = long>
+            bool ready(std::chrono::duration<Rep> timeout=0) {
+                return owned_proc.isReady(timeout);
+            }
 
         // pipe some data to the receiver process, and return the receiver process
         // we do this so we can have: process1.pipe_to(process2).pipe_to(process3)...etc
@@ -733,36 +764,9 @@ class Process {
             return *this;
         }
 
-        // retrieve a line of stdout from this process (blocking)
+        // retrieve a line of stdout from this process (blocking) into the string
         Process& operator>>(std::string& outputLine) {
-            if (!started || finished) {
-                throw std::runtime_error("cannot read line from inactive process");
-            }
-
-            if (successor_processes.size() > 0 || feedout_files.size() > 0) {
-                throw std::runtime_error("manually reading line from process that is piped from is prohibited");
-            }
-
-            lines_written++;
-
-            if (!stdout_queue.empty()) {
-                outputLine = stdout_queue.front();
-                stdout_queue.pop_front();
-            } else {
-                outputLine = owned_proc.readLine();
-            }
-            
-            // TODO: i think its possible we miss some lines, if a process pipes to this one, this fn isn't called
-            //          We might need to save lines from those instances, and yield from them when necessary.?
-            //          We have to save them rather than leaving them in the pipe as otherwise blockages may occur
-
-            // call functor XXX: this will get called twice for processes that get piped to...
-            // so.. where do we call this..?
-            // hmm... perhaps the write fn should instead call this operator...or vice versa and shuffle code.
-            func(outputLine);
-
-            // no need to output to the successors (they can't exist when using this fn)
-            
+            outputLine = read();
             return *this;
         }
 
