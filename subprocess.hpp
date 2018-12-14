@@ -566,9 +566,7 @@ class Process {
 
     protected:
         std::string get_identifier() {
-            std::stringstream ret;
-            ret << owned_proc.processArgs[0] << process_id_counter;
-            return ret.str();
+            return std::to_string(identifier);
         }
 
         void pump_input() {
@@ -650,8 +648,9 @@ class Process {
         std::string build_pred_topology() {
             std::stringstream ret;
 
+            ret << this->get_identifier() << " [label=\"" << this->owned_proc.processArgs[0] << "\"];\n";
             for (Process* p : predecessor_processes) {
-                ret << p->get_identifier() << "-->" << this->get_identifier() << "\n";
+                ret << p->get_identifier() << "->" << this->get_identifier() << ";\n";
                 ret << p->build_pred_topology();
             }
 
@@ -660,9 +659,10 @@ class Process {
 
         std::string build_succ_topology() {
             std::stringstream ret;
+            ret << this->get_identifier() << " [label=\"" << this->owned_proc.processArgs[0] << "\"];\n";
 
             for (Process* p : successor_processes) {
-                ret << this->get_identifier() << "-->" << p->get_identifier() << "\n";
+                ret << this->get_identifier() << "->" << p->get_identifier() << ";\n";
                 ret << p->build_succ_topology();
             }
 
@@ -687,43 +687,15 @@ class Process {
          * TODO: less hacky way ^^
          * 
          */
-        std::string get_network_topology(bool first_call=true) {
+        std::string get_network_topology() {
             std::stringstream ret;
 
-            if (first_call) {
-                ret << "digraph G {\n";
-            }
+            ret << "digraph G {\n";
 
-            auto append_topology = [&](decltype(predecessor_processes)& processes) {
-                for (Process* proc: processes) {
-                    ret << proc->get_network_topology(false);
-                }
-            };
+            ret << build_pred_topology();
+            ret << build_succ_topology();
 
-            enum ORDER_TYPE { PRED, SUCC };
-            auto append_edges = [&](decltype(predecessor_processes)& processes, 
-                                    enum ORDER_TYPE type) {
-                for (Process* p : processes) {
-                    // edge direction based on type
-                    if (type == PRED) {
-                        ret << p->get_identifier() << "-->" << this->get_identifier() << "\n";
-                    } else if (type == SUCC) {
-                        ret << this->get_identifier() << "-->" << p->get_identifier() << "\n";
-                    }
-                }
-            };
-
-            append_topology(predecessor_processes);
-            
-            // insert this node, and edges (identifier is process name plus incrementing integer)
-            append_edges(predecessor_processes, ORDER_TYPE::PRED);
-            append_edges(successor_processes, ORDER_TYPE::SUCC);
-
-            append_topology(successor_processes);
-
-            if (first_call) {
-                ret << "}\n";
-            }
+            ret << "}\n";
 
             return ret.str();
         }
