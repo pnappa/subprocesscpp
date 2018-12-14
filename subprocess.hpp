@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <set>
+#include <stack>
 #include <functional>
 #include <future>
 #include <iostream>
@@ -644,31 +646,6 @@ class Process {
             }
         }
 
-        /** build a graphvis string of predecessors recursively */
-        std::string build_pred_topology() {
-            std::stringstream ret;
-
-            ret << this->get_identifier() << " [label=\"" << this->owned_proc.processArgs[0] << "\"];\n";
-            for (Process* p : predecessor_processes) {
-                ret << p->get_identifier() << "->" << this->get_identifier() << ";\n";
-                ret << p->build_pred_topology();
-            }
-
-            return ret.str();
-        }
-
-        std::string build_succ_topology() {
-            std::stringstream ret;
-            ret << this->get_identifier() << " [label=\"" << this->owned_proc.processArgs[0] << "\"];\n";
-
-            for (Process* p : successor_processes) {
-                ret << this->get_identifier() << "->" << p->get_identifier() << ";\n";
-                ret << p->build_succ_topology();
-            }
-
-            return ret.str();
-        }
-
     public:
         template<class ArgIterable = decltype(internal::dummyVec), class Functor = std::function<void(std::string)>>
             Process(const std::string& commandPath, const ArgIterable& commandArgs = internal::dummyVec) : 
@@ -683,17 +660,40 @@ class Process {
 
         /**
          * Get a graphvis compatible representation of the process network (DOT format)
-         * first_call is a bool determining whether this is the first level of recursion or not.
-         * TODO: less hacky way ^^
-         * 
          */
         std::string get_network_topology() {
             std::stringstream ret;
 
             ret << "digraph G {\n";
 
-            ret << build_pred_topology();
-            ret << build_succ_topology();
+            std::set<Process*> visited_processes;
+            std::stack<Process*> to_visit;
+
+            to_visit.emplace(this);
+
+            while (!to_visit.empty()) {
+                Process* top = to_visit.top();
+                to_visit.pop();
+                // ignore the already visited
+                if (visited_processes.count(top)) continue;
+
+                visited_processes.emplace(top);
+
+                // add the label for this process
+                ret << top->get_identifier() << " [label=\"" << top->owned_proc.processArgs[0] << "\"];\n";
+
+                // add edges for each of the parents and children, then queue them up to be visited
+                // as predecessor_procs and successor_procs are symmetric, we only need to add one
+                for (Process* proc : top->predecessor_processes) {
+                    ret << proc->get_identifier() << "->" << top->get_identifier() << ";\n";
+                    to_visit.emplace(proc); 
+                }
+
+                for (Process* proc : top->successor_processes) {
+                    to_visit.emplace(proc); 
+                }
+
+            }
 
             ret << "}\n";
 
