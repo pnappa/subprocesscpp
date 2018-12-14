@@ -8,7 +8,7 @@
 #include "subprocess.hpp"
 
 int main() {
-    subprocess::Process incrementer("./test_programs/increment", {}, [&](std::string s) { std::cout << s << std::endl; });
+    subprocess::Process incrementer("./test_programs/increment", {}, [&](std::string s) { std::cout << s; });
     subprocess::Process prime_checker("./test_programs/tee_if_nonprime");
 
     incrementer.pipe_to(prime_checker);
@@ -17,5 +17,12 @@ int main() {
 
     incrementer.start();
     incrementer << "33\n";
+
+    incrementer.force_output();
+    prime_checker.force_output();
+    incrementer.force_output();
+    prime_checker.force_output();
+    incrementer.force_output();
+    prime_checker.force_output();
 }
 

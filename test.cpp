@@ -327,6 +327,8 @@ TEST_CASE("process functor", "[subprocess::Process]") {
     // just ensure that even after the dtor, the functor isn't invoked again!
     std::string line;
     size_t func_count = 0;
+    // as the dtors are invoked in a stack like matter, this fn will be checked after the 
+    // process' termination
     auto deferred_assertion = Deferrable<std::function<void()>>([&]() {
         REQUIRE(func_count == 1);
     });
@@ -337,9 +339,8 @@ TEST_CASE("process functor", "[subprocess::Process]") {
             });
 
     p.start();
-    p >> line;
+    p.finish();
 
-    REQUIRE(line == "henlo world\n");
     REQUIRE(func_count == 1);
 }
 

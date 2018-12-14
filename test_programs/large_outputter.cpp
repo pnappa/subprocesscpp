@@ -84,6 +84,7 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
 
+    // default output length
     ssize_t num_bytes = 1 << 17;
     if (argc >= 3) {
         num_bytes = std::stoi(std::string(argv[2]));

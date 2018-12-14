@@ -16,6 +16,7 @@
 #include <cassert>
 #include <deque>
 #include <fstream>
+#include <sstream>
 
 // unix process stuff
 #include <cstring>
@@ -27,6 +28,8 @@
 
 
 namespace subprocess {
+
+    class Process;
 namespace internal {
 /**
  * A TwoWayPipe that allows reading and writing between two processes
@@ -256,6 +259,8 @@ public:
  * connection
  * */
 class Process {
+    friend class subprocess::Process;
+
     pid_t pid;
     TwoWayPipe pipe;
 
@@ -524,11 +529,17 @@ std::vector<std::string> check_output(const std::string& commandPath, const ArgI
 }
 
 // TODO: what if the process terminates? consider error handling potentials...
+/**
+ * A representation of a process. A process may be piped to one or more other processes or files.
+ * Currently, this version does not support cyclic pipes, use AsyncProcess for that.
+ */
 class Process {
         // need some list of processes this process is supposed to pipe to (if any)
         // XXX: what if the child processes are moved? should we keep a reference to the parent(s) then update us within their vector..?
         std::vector<Process*> successor_processes;
         std::vector<Process*> predecessor_processes;
+        static_assert(std::is_same<decltype(successor_processes), decltype(predecessor_processes)>::value, "processes must be stored in same container type");
+
         // TODO: how should we handle this..?
         //  The reason why its not trivial is that we may want to have a file pipe to multiple processes, and it feels
         //  like a waste to read from the file N times to output to N processes.
@@ -545,11 +556,20 @@ class Process {
         mutable size_t lines_written = 0;
         mutable size_t lines_received = 0;
 
+        static size_t process_id_counter;
+
         internal::Process owned_proc;
+        size_t identifier = process_id_counter++;
 
         std::deque<std::string> stdin_queue;
         std::deque<std::string> stdout_queue;
+
     protected:
+        std::string get_identifier() {
+            std::stringstream ret;
+            ret << owned_proc.processArgs[0] << process_id_counter;
+            return ret.str();
+        }
 
         void pump_input() {
             assert(started && "error: input propagated for inactive process");
@@ -573,10 +593,10 @@ class Process {
         }
 
         void pump_output() {
+            if (finished) return;
             assert(started && "error: output propagated for inactive process");
 
             while (owned_proc.isReady()) {
-                lines_written++;
                 std::string out = owned_proc.readLine();
 
                 this->write_next(out);
@@ -604,30 +624,127 @@ class Process {
             }
         }
 
+        /**
+         * Read from this process (and all predecessors) until their and this process is finished.
+         */
+        void read_until_completion() {
+            // XXX: should we colour this to check that it isn't a cyclic network, and throw an exception?
+            if (finished) {
+                return;
+            }
+
+            // we need to do block and read for the preds first (they must complete before this one can)
+            for (Process* pred_process : predecessor_processes) {
+                pred_process->read_until_completion();
+            }
+
+            // then block read for us & forward output
+            std::string processOutput;
+            while ((processOutput = owned_proc.readLine()).size() > 0) {
+                this->write_next(processOutput);
+                finished = true;
+            }
+        }
+
+        /** build a graphvis string of predecessors recursively */
+        std::string build_pred_topology() {
+            std::stringstream ret;
+
+            for (Process* p : predecessor_processes) {
+                ret << p->get_identifier() << "-->" << this->get_identifier() << "\n";
+                ret << p->build_pred_topology();
+            }
+
+            return ret.str();
+        }
+
+        std::string build_succ_topology() {
+            std::stringstream ret;
+
+            for (Process* p : successor_processes) {
+                ret << this->get_identifier() << "-->" << p->get_identifier() << "\n";
+                ret << p->build_succ_topology();
+            }
+
+            return ret.str();
+        }
+
     public:
         template<class ArgIterable = decltype(internal::dummyVec), class Functor = std::function<void(std::string)>>
-            Process(const std::string& commandPath, const ArgIterable& commandArgs = internal::dummyVec, Functor func = [](std::string){}) : 
+            Process(const std::string& commandPath, const ArgIterable& commandArgs = internal::dummyVec) : 
+                owned_proc(commandPath, commandArgs.begin(), commandArgs.end(), internal::dummyVec.begin(), internal::dummyVec.end()) {
+            }
+        template<class ArgIterable = decltype(internal::dummyVec), class Functor = std::function<void(std::string)>>
+            Process(const std::string& commandPath, const ArgIterable& commandArgs, Functor func) : 
                 owned_proc(commandPath, commandArgs.begin(), commandArgs.end(), internal::dummyVec.begin(), internal::dummyVec.end()) {
                     // TODO: change back to new Functor(func), when I'm able to set the member variables type in the ctor.
                     this->func = new std::function<void(std::string)>(func);
             }
 
-        ~Process() {
-            // err, need to close all predecessors (if any)
-            // if there is a cycle in the processes, this doesn't cause an infinite loop
-            // as if they're already closed, they're a no-op.
+        /**
+         * Get a graphvis compatible representation of the process network (DOT format)
+         * first_call is a bool determining whether this is the first level of recursion or not.
+         * TODO: less hacky way ^^
+         * 
+         */
+        std::string get_network_topology(bool first_call=true) {
+            std::stringstream ret;
+
+            if (first_call) {
+                ret << "digraph G {\n";
+            }
+
+            auto append_topology = [&](decltype(predecessor_processes)& processes) {
+                for (Process* proc: processes) {
+                    ret << proc->get_network_topology(false);
+                }
+            };
+
+            enum ORDER_TYPE { PRED, SUCC };
+            auto append_edges = [&](decltype(predecessor_processes)& processes, 
+                                    enum ORDER_TYPE type) {
+                for (Process* p : processes) {
+                    // edge direction based on type
+                    if (type == PRED) {
+                        ret << p->get_identifier() << "-->" << this->get_identifier() << "\n";
+                    } else if (type == SUCC) {
+                        ret << this->get_identifier() << "-->" << p->get_identifier() << "\n";
+                    }
+                }
+            };
+
+            append_topology(predecessor_processes);
+            
+            // insert this node, and edges (identifier is process name plus incrementing integer)
+            append_edges(predecessor_processes, ORDER_TYPE::PRED);
+            append_edges(successor_processes, ORDER_TYPE::SUCC);
+
+            append_topology(successor_processes);
+
+            if (first_call) {
+                ret << "}\n";
+            }
+
+            return ret.str();
+        }
+
+        virtual ~Process() {
+            // what needs to be done here is that output from predecessors needs to be forced until completion
+
+            // need to close all predecessors (if any)
             for (Process* pred_process : predecessor_processes) {
                 pred_process->finish();
             }
 
-            this->owned_proc.sendEOF();
+            // this->owned_proc.sendEOF();
             // process any remaining input/output
             finish();
 
             // do the same for outputting processes
-            for (Process* succ_process : successor_processes) {
-                succ_process->finish();
-            }
+            // XXX: i don't think I need/should do this, right?
+            // for (Process* succ_process : successor_processes) {
+            //     succ_process->finish();
+            // }
 
             // our function is dynamically allocated (how else do we test for null functors..?)
             delete func;
@@ -643,7 +760,7 @@ class Process {
             started = true; 
 
             // recursively start all predecessor processes
-            // do this to ensure that 
+            // do this to ensure that if this process relies on a predecessor's input, then it will terminate.
             for (auto pred_process : predecessor_processes) {
                 pred_process->start();
             }
@@ -661,20 +778,12 @@ class Process {
 
         int finish() {
             if (finished) return this->retval;
+
             pump_input();
+            read_until_completion();
             pump_output();
             
-            // iterate over each line of remaining output by the child's stdout, and call the functor
-            std::string processOutput;
-            while ((processOutput = owned_proc.readLine()).size() > 0) {
-                this->write_next(processOutput);
-                lines_written++;
-            }
-
-            this->retval = owned_proc.waitUntilFinished();
-            finished = true;
-
-            return this->retval;
+            return owned_proc.waitUntilFinished();
         }
 
         bool is_started() const { return started; }
@@ -747,6 +856,7 @@ class Process {
         //     return receiver;
         // }
         void output_to_file(const std::string& filename) {
+            // XXX: in some compilers this causes a warning, whilst in others omitting it causes an error.
             feedout_files.push_back(std::move(std::ofstream(filename)));
             if (!feedout_files.back().good()) throw std::runtime_error("error: file " + filename + " failed to open");
         }
@@ -786,6 +896,31 @@ class Process {
         // provide an iterator to iterate over the stdout produced
         iterator begin();
         iterator end();
+};
+
+// initialise the id counter, dumb c++ standard doesn't allow it
+size_t Process::process_id_counter = 0;
+
+/**
+ * An async equivalent of Process
+ * It constantly blocks for input to allow cyclic process flows
+ */
+class AsyncProcess : Process {
+
+    std::future<int> retval;
+
+    public:
+        template<class ArgIterable = decltype(internal::dummyVec), class Functor = std::function<void(std::string)>>
+        AsyncProcess(const std::string& commandPath, const ArgIterable& commandArgs = internal::dummyVec, Functor func = [](std::string){}) : 
+            Process(commandPath, commandArgs, func) { }
+
+        ~AsyncProcess() {
+
+        }
+
+        void start() {
+
+        }
 };
 
 }  // end namespace subprocess
