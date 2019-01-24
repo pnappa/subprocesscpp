@@ -369,6 +369,7 @@ TEST_CASE("post process start input", "[subprocess::Process]") {
     REQUIRE(line == "henlo world\n");
 }
 
+/*
 TEST_CASE("reading from process that itself is a successor proc", "[subprocess::Process]") {
     // TODO: add timeout
     subprocess::Process p1("/bin/echo", {"high to roam"});
@@ -410,6 +411,7 @@ TEST_CASE("RAII doesn't start non-started process", "[subprocess:Process]") {
             FAIL("process output when shouldn't have");
             });
 }
+*/
 
 TEST_CASE("superfluous input", "[subprocess::Process]") {
     // provide input to a process that won't use it.

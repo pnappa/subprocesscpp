@@ -549,22 +549,31 @@ class Process {
         std::vector<std::ofstream> feedout_files;
         // the function to call every time a line is output
         // TODO: somehow make it use the ctor template type
-        std::function<void(std::string)>* func = nullptr;
+        std::unique_ptr<std::function<void(std::string)>> func = nullptr;
+
+        std::unique_ptr<std::thread> propagate_thread = nullptr;
 
         bool started = false;
         bool finished = false;
+        // XXX: this isn't set anywhere..?
         int retval;
         
-        mutable size_t lines_written = 0;
-        mutable size_t lines_received = 0;
+        std::atomic<size_t> lines_received{0};
+        // number of lines propagated to next process(es)/file(s)/functor
+        std::atomic<size_t> lines_written{0};
 
         static size_t process_id_counter;
 
         internal::Process owned_proc;
+        // incrementing id unique to a process
         size_t identifier = process_id_counter++;
 
         std::deque<std::string> stdin_queue;
+        // written to by the write_next routine if there isn't a successor process/file/functor, etc.
         std::deque<std::string> stdout_queue;
+
+        // ensures that the queues are read
+        std::mutex lock;
 
     protected:
         std::string get_identifier() {
@@ -603,11 +612,20 @@ class Process {
             }
         }
 
+        bool has_successor_obj() {
+            return !(successor_processes.empty() && feedout_files.empty() && func == nullptr);
+        }
+
         void write_next(const std::string& out) {
             assert(started && "error: input propagated for inactive process");
 
-            // hold onto stdout if we don't have any successors or lambdas to execute
-            if (successor_processes.empty() && feedout_files.empty() && func == nullptr) {
+            ++lines_written;
+
+            // hold onto stdout if we don't have any successor processes or lambdas to execute
+            if (!has_successor_obj()) {
+                // ensure that the output queue isn't multi-edited
+                std::lock_guard<std::mutex> guard(lock);
+
                 stdout_queue.push_back(out);
             } else {
                 // call functor
@@ -624,26 +642,21 @@ class Process {
             }
         }
 
-        /**
-         * Read from this process (and all predecessors) until their and this process is finished.
-         */
-        void read_until_completion() {
-            // XXX: should we colour this to check that it isn't a cyclic network, and throw an exception?
-            if (finished) {
-                return;
-            }
+        /** in the background, start this process and block for input */
+        void run() {
+            assert(propagate_thread == nullptr && "process should only be run once");
 
-            // we need to do block and read for the preds first (they must complete before this one can)
-            for (Process* pred_process : predecessor_processes) {
-                pred_process->read_until_completion();
-            }
+            // XXX: assumes the successor and predecessor processes have started
 
-            // then block read for us & forward output
-            std::string processOutput;
-            while ((processOutput = owned_proc.readLine()).size() > 0) {
-                this->write_next(processOutput);
-                finished = true;
-            }
+            owned_proc.start();
+            pump_input();
+            propagate_thread = std::unique_ptr<std::thread>(new std::thread([&]() {
+                // then block read for us & forward output
+                std::string processOutput;
+                while ((processOutput = owned_proc.readLine()).size() > 0) {
+                    this->write_next(processOutput);
+                }
+                    }));
         }
 
     public:
@@ -653,9 +666,7 @@ class Process {
             }
         template<class ArgIterable = decltype(internal::dummyVec), class Functor = std::function<void(std::string)>>
             Process(const std::string& commandPath, const ArgIterable& commandArgs, Functor func) : 
-                owned_proc(commandPath, commandArgs.begin(), commandArgs.end(), internal::dummyVec.begin(), internal::dummyVec.end()) {
-                    // TODO: change back to new Functor(func), when I'm able to set the member variables type in the ctor.
-                    this->func = new std::function<void(std::string)>(func);
+                func(new std::function<void(std::string)>(func)), owned_proc(commandPath, commandArgs.begin(), commandArgs.end(), internal::dummyVec.begin(), internal::dummyVec.end()) {
             }
 
         /**
@@ -680,6 +691,7 @@ class Process {
                 visited_processes.emplace(top);
 
                 // add the label for this process
+                // TODO: escape values..?
                 ret << top->get_identifier() << " [label=\"" << top->owned_proc.processArgs[0] << "\"];\n";
 
                 // add edges for each of the parents and children, then queue them up to be visited
@@ -693,6 +705,8 @@ class Process {
                     to_visit.emplace(proc); 
                 }
 
+                // TODO: input/output files
+                // note to be careful, there's some assumptions of uniqueness of files
             }
 
             ret << "}\n";
@@ -717,9 +731,6 @@ class Process {
             // for (Process* succ_process : successor_processes) {
             //     succ_process->finish();
             // }
-
-            // our function is dynamically allocated (how else do we test for null functors..?)
-            delete func;
         }
 
         // start the process and prevent any more pipes from being established.
@@ -727,8 +738,6 @@ class Process {
         void start() {
             // ignore an already started process
             if (started) return;
-
-            owned_proc.start();
             started = true; 
 
             // recursively start all predecessor processes
@@ -741,21 +750,25 @@ class Process {
             for (auto successor_proc : successor_processes) {
                 successor_proc->start();
             }
+           
+            // spawn the thread that reads input
+            this->run();
+        }
 
-            // push out any pending input
-            pump_input();
-            // propagate output some more
-            pump_output();
+        bool is_finished() {
+            return propagate_thread != nullptr && !propagate_thread->joinable();
         }
 
         int finish() {
-            if (finished) return this->retval;
+            if (propagate_thread == nullptr) throw std::runtime_error("error: trying to finish a non-started process");
+            if (is_finished()) return this->retval;
 
-            pump_input();
-            read_until_completion();
-            pump_output();
-            
-            return owned_proc.waitUntilFinished();
+            // run until stdin is closed (whilst propagating stdout)
+            propagate_thread->join();
+
+            // wait for the process to terminate
+            this->retval = owned_proc.waitUntilFinished();
+            return this->retval;
         }
 
         bool is_started() const { return started; }
@@ -764,8 +777,9 @@ class Process {
         void write(const std::string& inputLine) {
             if (finished) throw std::runtime_error("cannot write to a finished process");
 
+            this->lines_received++;
+
             if (is_started()) {
-                this->lines_written++;
 
                 owned_proc.write(inputLine);
 
@@ -773,40 +787,63 @@ class Process {
 
             // if it hasn't been started, then we queue up the input for later
             } else {
+                // ensure that the output queue isn't multi-edited
+                std::lock_guard<std::mutex> guard(lock);
+
                 stdin_queue.push_front(inputLine);
             }
         }
 
         // read a line and block until received (or until timeout reached)
-        template <typename Rep = long>
-            std::string read(std::chrono::duration<Rep> timeout = std::chrono::duration<Rep>(-1)){
-                std::string outputLine;
+        // template <typename Rep = long>
+        //     std::string read(std::chrono::duration<Rep> timeout = std::chrono::duration<Rep>(-1)){
+        //         std::string outputLine;
 
-                if (!started || finished) {
-                    throw std::runtime_error("cannot read line from inactive process");
+        //         if (!started || finished) {
+        //             throw std::runtime_error("cannot read line from inactive process");
+        //         }
+
+        //         if (successor_processes.size() > 0 || feedout_files.size() > 0 || func != nullptr) {
+        //             
+        //         }
+
+        //         lines_written++;
+
+        //         // we may have lines of output to "use" from earlier
+        //         if (!stdout_queue.empty()) {
+        //             outputLine = stdout_queue.front();
+        //             stdout_queue.pop_front();
+        //         } else {
+        //             outputLine = owned_proc.readLine(timeout);
+        //         }
+
+        //         return outputLine;
+        //     }
+        // // if there is a line for reading (optionally 
+        // template <typename Rep = long>
+        //     bool ready(std::chrono::duration<Rep> timeout=0) {
+        //         return owned_proc.isReady(timeout);
+        //     }
+
+        std::string read() {
+            if (!started || finished) throw std::runtime_error("cannot read line from inactive process");
+            if (has_successor_obj()) throw std::runtime_error("manually reading line from process that is piped from/has a functor is prohibited");
+
+            ++lines_written;
+            for (;;) {
+                // someone else is writing to this thread, give it some time
+                if (!lock.try_lock()) {
+                    std::this_thread::yield();
+                    continue;
                 }
 
-                if (successor_processes.size() > 0 || feedout_files.size() > 0 || func != nullptr) {
-                    throw std::runtime_error("manually reading line from process that is piped from/has a functor is prohibited");
-                }
+                std::string ret = stdout_queue.back();
+                ret.pop_back();
 
-                lines_written++;
-
-                // we may have lines of output to "use" from earlier
-                if (!stdout_queue.empty()) {
-                    outputLine = stdout_queue.front();
-                    stdout_queue.pop_front();
-                } else {
-                    outputLine = owned_proc.readLine(timeout);
-                }
-
-                return outputLine;
+                lock.unlock();
+                return ret;
             }
-        // if there is a line for reading (optionally 
-        template <typename Rep = long>
-            bool ready(std::chrono::duration<Rep> timeout=0) {
-                return owned_proc.isReady(timeout);
-            }
+        }
 
         // pipe some data to the receiver process, and return the receiver process
         // we do this so we can have: process1.pipe_to(process2).pipe_to(process3)...etc
@@ -872,27 +909,5 @@ class Process {
 
 // initialise the id counter, dumb c++ standard doesn't allow it
 size_t Process::process_id_counter = 0;
-
-/**
- * An async equivalent of Process
- * It constantly blocks for input to allow cyclic process flows
- */
-class AsyncProcess : Process {
-
-    std::future<int> retval;
-
-    public:
-        template<class ArgIterable = decltype(internal::dummyVec), class Functor = std::function<void(std::string)>>
-        AsyncProcess(const std::string& commandPath, const ArgIterable& commandArgs = internal::dummyVec, Functor func = [](std::string){}) : 
-            Process(commandPath, commandArgs, func) { }
-
-        ~AsyncProcess() {
-
-        }
-
-        void start() {
-
-        }
-};
 
 }  // end namespace subprocess
