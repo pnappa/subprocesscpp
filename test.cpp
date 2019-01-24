@@ -296,6 +296,7 @@ TEST_CASE("[iterator] check_output permutations (varargs)", "[subprocess::check_
 }
 
 
+
 // TODO: make all these have timeouts! it's possible that they never terminate
 // TODO: somehow ensure that if we try and retrieve more output it fails..? idk, seems annoying
 //       perhaps we just use the timeouts, with some reasonable duration..?
@@ -311,6 +312,7 @@ TEST_CASE("basic process instantiation", "[subprocess::Process]") {
     REQUIRE(line == "henlo world\n");
 }
 
+/*
 // handy deferrable functions (executed on dtor)
 template <typename Functor>
 struct Deferrable {
@@ -368,6 +370,7 @@ TEST_CASE("post process start input", "[subprocess::Process]") {
 
     REQUIRE(line == "henlo world\n");
 }
+*/
 
 /*
 TEST_CASE("reading from process that itself is a successor proc", "[subprocess::Process]") {

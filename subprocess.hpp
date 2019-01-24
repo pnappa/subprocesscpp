@@ -555,6 +555,9 @@ class Process {
 
         bool started = false;
         bool finished = false;
+        // this is set ONLY when started. always use has_successor_obj()
+        bool has_successor;
+        
         // XXX: this isn't set anywhere..?
         int retval;
         
@@ -562,43 +565,39 @@ class Process {
         // number of lines propagated to next process(es)/file(s)/functor
         std::atomic<size_t> lines_written{0};
 
-        static size_t process_id_counter;
+        static std::atomic<size_t> process_id_counter;
 
         internal::Process owned_proc;
         // incrementing id unique to a process
         size_t identifier = process_id_counter++;
 
-        std::deque<std::string> stdin_queue;
+        class SafeQueue {
+            std::deque<std::string> m_queue;
+            std::mutex m_lock;
+
+            public:
+            void add(const std::string& s) {
+                std::lock_guard<std::mutex> guard(m_lock);
+                m_queue.emplace_back(s);
+            }
+
+            // return the string, and if the string is valid
+            std::pair<std::string, bool> pop() {
+                std::lock_guard<std::mutex> guard(m_lock);
+                if (m_queue.empty()) return {"", false};
+                std::string s = m_queue.front();
+                m_queue.pop_front();
+                return {s, true};
+            }
+        };
+
+        SafeQueue stdin_queue;
         // written to by the write_next routine if there isn't a successor process/file/functor, etc.
-        std::deque<std::string> stdout_queue;
-
-        // ensures that the queues are read
-        std::mutex lock;
-
+        // XXX: this may not need to be a safe queue?
+        SafeQueue stdout_queue;
     protected:
         std::string get_identifier() {
             return std::to_string(identifier);
-        }
-
-        void pump_input() {
-            assert(started && "error: input propagated for inactive process");
-
-            // write any queued stdinput
-            while (!stdin_queue.empty()) {
-                this->write(stdin_queue.front());
-                stdin_queue.pop_front();
-                pump_output();
-            }
-
-            // each of the input files to this process has to be pumped too
-            // for (std::ifstream* ifile : feedin_files) {
-            //     // write as many lines from the input file until we run out
-            //     for (std::string line; std::getline(*ifile, line); ) {
-            //         // we gotta append a newline, getline omits it.
-            //         this->write(line + "\n");
-            //         pump_output();
-            //     }
-            // }
         }
 
         void pump_output() {
@@ -613,6 +612,7 @@ class Process {
         }
 
         bool has_successor_obj() {
+            if (started) return has_successor;
             return !(successor_processes.empty() && feedout_files.empty() && func == nullptr);
         }
 
@@ -623,10 +623,7 @@ class Process {
 
             // hold onto stdout if we don't have any successor processes or lambdas to execute
             if (!has_successor_obj()) {
-                // ensure that the output queue isn't multi-edited
-                std::lock_guard<std::mutex> guard(lock);
-
-                stdout_queue.push_back(out);
+                stdout_queue.add(out);
             } else {
                 // call functor
                 (*func)(out);
@@ -642,17 +639,27 @@ class Process {
             }
         }
 
-        /** in the background, start this process and block for input */
+        /** in the background, start this process and block for input
+         * Do not call directly, start calls this fn. */
         void run() {
             assert(propagate_thread == nullptr && "process should only be run once");
 
             // XXX: assumes the successor and predecessor processes have started
 
             owned_proc.start();
-            pump_input();
+
             propagate_thread = std::unique_ptr<std::thread>(new std::thread([&]() {
-                // then block read for us & forward output
                 std::string processOutput;
+                bool isValid;
+                // iterate over the stdin queue now, finish when there's no more strings to iterate over
+                while (std::tie(processOutput, isValid) = stdin_queue.pop(), isValid) {
+                    this->write_next(processOutput);
+                }
+
+                // XXX: consider input files later. we may not have input files though, as cat filename will
+                // work perfectly fine as a substitute and less work for me!
+
+                // then block read for us & forward output
                 while ((processOutput = owned_proc.readLine()).size() > 0) {
                     this->write_next(processOutput);
                 }
@@ -738,6 +745,8 @@ class Process {
         void start() {
             // ignore an already started process
             if (started) return;
+            // cache the result, as it can't change now.
+            has_successor = has_successor_obj();
             started = true; 
 
             // recursively start all predecessor processes
@@ -780,17 +789,10 @@ class Process {
             this->lines_received++;
 
             if (is_started()) {
-
                 owned_proc.write(inputLine);
-
-                pump_output();
-
             // if it hasn't been started, then we queue up the input for later
             } else {
-                // ensure that the output queue isn't multi-edited
-                std::lock_guard<std::mutex> guard(lock);
-
-                stdin_queue.push_front(inputLine);
+                stdin_queue.add(inputLine);
             }
         }
 
@@ -830,18 +832,13 @@ class Process {
             if (has_successor_obj()) throw std::runtime_error("manually reading line from process that is piped from/has a functor is prohibited");
 
             ++lines_written;
+            std::string lineOut;
+            bool isValid;
             for (;;) {
-                // someone else is writing to this thread, give it some time
-                if (!lock.try_lock()) {
-                    std::this_thread::yield();
-                    continue;
-                }
-
-                std::string ret = stdout_queue.back();
-                ret.pop_back();
-
-                lock.unlock();
-                return ret;
+                // continue until we have a proper line
+                std::tie(lineOut, isValid) = stdout_queue.pop();
+                if (!isValid) continue;
+                return lineOut;
             }
         }
 
@@ -856,6 +853,7 @@ class Process {
             receiver.predecessor_processes.push_back(this);
             return receiver;
         }
+
         // ditto
         Process& operator>>(Process& receiver) { return this->pipe_to(receiver); }
         // XXX: removed this because the dtor wasn't handled well
@@ -908,6 +906,7 @@ class Process {
 };
 
 // initialise the id counter, dumb c++ standard doesn't allow it
-size_t Process::process_id_counter = 0;
+// XXX: this means that people that don't compile with -lpthread will fail. argggh
+std::atomic<size_t> Process::process_id_counter{0};
 
 }  // end namespace subprocess
