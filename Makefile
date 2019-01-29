@@ -15,8 +15,11 @@ demo: demo.cpp subprocess.hpp
 check: test test_programs
 	valgrind ./test
 
-test: test.cpp subprocess.hpp
-	$(CXX) $(CXXFLAGS) test.cpp -o test $(LIBS)
+test.o: test.cpp
+	$(CXX) $(CXXFLAGS) -c test.cpp -o test.o
+
+test: test.o test-auxilliary.cpp subprocess.hpp
+	$(CXX) $(CXXFLAGS) test.o test-auxilliary.cpp -o test $(LIBS)
 
 coverage: test.cpp subprocess.hpp
 	$(CXX) $(CXXFLAGS) -fprofile-arcs -ftest-coverage test.cpp -o coverage $(LIBS)
