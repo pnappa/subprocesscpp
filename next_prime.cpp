@@ -17,12 +17,5 @@ int main() {
 
     incrementer.start();
     incrementer << "33\n";
-
-    incrementer.force_output();
-    prime_checker.force_output();
-    incrementer.force_output();
-    prime_checker.force_output();
-    incrementer.force_output();
-    prime_checker.force_output();
 }
 

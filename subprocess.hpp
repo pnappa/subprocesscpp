@@ -144,6 +144,8 @@ public:
 
         dup2(input_pipe_file_descriptor[0], STDIN_FILENO);
         dup2(output_pipe_file_descriptor[1], STDOUT_FILENO);
+        // XXX: do we really want stderr merged with stdout?
+        // me thinks (pnappa) we should have a separate way to access this
         dup2(output_pipe_file_descriptor[1], STDERR_FILENO);
 
         closeUnusedEnds();
@@ -571,23 +573,39 @@ class Process {
         // incrementing id unique to a process
         size_t identifier = process_id_counter++;
 
+        // TODO: change this into this
+        // https://stackoverflow.com/a/36228824/1129185
+        // one of the problems is that the reader potentially obtains
+        // the lock too often. Using a condition variable also means
+        // that we know we can always guarantee that we can return a value
+        // ...but this may not be good - what if we want to leave as we're
+        // terminating the thread? Add another function I suppose, called .finish()
+        // or something..?
         class SafeQueue {
-            std::deque<std::string> m_queue;
-            std::mutex m_lock;
+            std::deque<std::string> queue;
+            // signalling there's something to read
+            std::condition_variable read_available;
+            std::mutex lock;
+
+            std::atomic<bool> is_finished;
 
             public:
             void add(const std::string& s) {
-                std::lock_guard<std::mutex> guard(m_lock);
-                m_queue.emplace_back(s);
+                std::lock_guard<std::mutex> guard(this->lock);
+                this->queue.emplace_back(s);
             }
 
             // return the string, and if the string is valid
             std::pair<std::string, bool> pop() {
-                std::lock_guard<std::mutex> guard(m_lock);
-                if (m_queue.empty()) return {"", false};
-                std::string s = m_queue.front();
-                m_queue.pop_front();
+                std::lock_guard<std::mutex> guard(this->lock);
+                if (this->queue.empty()) return {"", false};
+                std::string s = this->queue.front();
+                this->queue.pop_front();
                 return {s, true};
+            }
+
+            void finish() {
+                is_finished.store(true, std::memory_order_seq_cst);
             }
         };
 
@@ -625,8 +643,10 @@ class Process {
             if (!has_successor_obj()) {
                 stdout_queue.add(out);
             } else {
-                // call functor
-                (*func)(out);
+                // call functor if it exists.
+                if (func) {
+                    (*func)(out);
+                }
 
                 for (Process* succ_process : successor_processes) {
                     succ_process->write(out);
@@ -653,7 +673,7 @@ class Process {
                 bool isValid;
                 // iterate over the stdin queue now, finish when there's no more strings to iterate over
                 while (std::tie(processOutput, isValid) = stdin_queue.pop(), isValid) {
-                    this->write_next(processOutput);
+                    this->write(processOutput);
                 }
 
                 // XXX: consider input files later. we may not have input files though, as cat filename will
@@ -663,6 +683,9 @@ class Process {
                 while ((processOutput = owned_proc.readLine()).size() > 0) {
                     this->write_next(processOutput);
                 }
+
+                std::cout << std::endl;
+
                     }));
         }
 
@@ -772,6 +795,12 @@ class Process {
             if (propagate_thread == nullptr) throw std::runtime_error("error: trying to finish a non-started process");
             if (is_finished()) return this->retval;
 
+            // XXX: is this valid? should this only be sent in the dtor?
+            // The reasoning is that for circular networks, this may be unwanted.
+            // ..but if we don't put it in the dtor, as we call .finish on the preds first
+            // it means that it may not halt anyway!
+            owned_proc.sendEOF();
+
             // run until stdin is closed (whilst propagating stdout)
             propagate_thread->join();
 
@@ -785,6 +814,8 @@ class Process {
         // write a line to the subprocess's stdin
         void write(const std::string& inputLine) {
             if (finished) throw std::runtime_error("cannot write to a finished process");
+            // TODO: add some kind of mutex..? might be complicated for recursive process.
+            // potentially a std::recursive_mutex..?
 
             this->lines_received++;
 

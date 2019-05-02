@@ -4,7 +4,7 @@ LIBS=-lpthread
 
 .PHONY: all clean
 
-all: print_env tee_if_nonprime increment large_outputter
+all: print_env tee_if_nonprime increment large_outputter echo
 
 print_env: print_env.cpp
 	$(CXX) $(CXXFLAGS) print_env.cpp -o print_env $(LIBS)
@@ -17,6 +17,9 @@ increment: increment.cpp
 
 large_outputter: large_outputter.cpp
 	$(CXX) $(CXXFLAGS) large_outputter.cpp -o large_outputter $(LIBS)
+
+echo: echo.cpp
+	$(CXX) $(CXXFLAGS) echo.cpp -o echo $(LIBS)
 
 clean:
 	rm -rvf print_env tee_if_nonprime increment large_outputter

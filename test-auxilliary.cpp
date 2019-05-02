@@ -10,6 +10,42 @@
  *  - TODO: should a process be started in the dtor if it hasn't already been..?
  */
 
+// handy deferrable functions (executed on dtor)
+template <typename Functor>
+struct Deferrable {
+    Functor func;
+    Deferrable(Functor f) : func(f) {}
+    ~Deferrable() {
+        func();
+    }
+};
+
+// class that enforces a timeout to fail the test
+using namespace std::chrono_literals;
+struct Timeout {
+    std::chrono::milliseconds c_duration = 0ms;
+    std::chrono::milliseconds total_time;
+    bool stopped = false;
+    std::thread waiter;
+
+    Timeout(std::chrono::milliseconds timeout = 3000ms) : 
+        total_time(timeout),
+        waiter(std::thread([&]() {
+                auto start = std::chrono::high_resolution_clock::now();
+                while (c_duration <= total_time) {
+                    std::this_thread::sleep_for(1ms);                  
+                    c_duration = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - start);
+                    if (stopped) return;
+                }
+                FAIL("test case reached timeout."); 
+                    })) {}
+
+     ~Timeout() {
+         stopped = true;
+         waiter.join();
+     }
+};
+
 TEST_CASE("[iterable] basic echo execution", "[subprocess::execute]") {
     std::list<std::string> inputs;
     std::vector<std::string> outputs;
@@ -305,16 +341,6 @@ TEST_CASE("basic process instantiation", "[subprocess::Process]") {
 }
 
 
-// handy deferrable functions (executed on dtor)
-template <typename Functor>
-struct Deferrable {
-    Functor func;
-    Deferrable(Functor f) : func(f) {}
-    ~Deferrable() {
-        func();
-    }
-};
-
 TEST_CASE("process functor", "[subprocess::Process]") {
 
     // requirement from the dead 
@@ -350,7 +376,6 @@ TEST_CASE("pre-emptive process input", "[subprocess::Process]") {
     REQUIRE(line == "henlo world\n");
 }
 
-/*
 TEST_CASE("post process start input", "[subprocess::Process]") {
     subprocess::Process p("/bin/cat");
 
@@ -363,10 +388,9 @@ TEST_CASE("post process start input", "[subprocess::Process]") {
 
     REQUIRE(line == "henlo world\n");
 }
-*/
 
-/*
 TEST_CASE("reading from process that itself is a successor proc", "[subprocess::Process]") {
+    //Timeout t(1000ms);
     // TODO: add timeout
     subprocess::Process p1("/bin/echo", {"high to roam"});
     subprocess::Process p2("/bin/grep", {"-o", "hi"});
@@ -376,10 +400,6 @@ TEST_CASE("reading from process that itself is a successor proc", "[subprocess::
     p1.start();
 
     std::string line;
-    // XXX: this line is currently making the test hang. The reason is simple, but the implications are complex.
-    // When reading from p2, there isn't a line instantly available, as it requires input from p1 
-    //  - but we don't currently call readline in the predecessor. If we do, what if the current
-    //  process *will* output, but is taking a while..?
     p2 >> line;
 
     REQUIRE(line == "hi\n");
@@ -407,7 +427,6 @@ TEST_CASE("RAII doesn't start non-started process", "[subprocess:Process]") {
             FAIL("process output when shouldn't have");
             });
 }
-*/
 
 TEST_CASE("superfluous input", "[subprocess::Process]") {
     // provide input to a process that won't use it.

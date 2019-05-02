@@ -1,13 +1,13 @@
 
-CXX=clang++
-CXXFLAGS=-g -std=c++11 -Wall -pedantic
+CXX=g++
+CXXFLAGS=-g -std=c++14 -Wall -pedantic
 LIBS=-lpthread
 
 .PHONY: all clean check test_programs
 all: demo check
 
 clean:
-	rm -fv demo test coverage
+	rm -fv demo test coverage test.o
 
 demo: demo.cpp subprocess.hpp
 	$(CXX) $(CXXFLAGS) demo.cpp -o demo $(LIBS)
