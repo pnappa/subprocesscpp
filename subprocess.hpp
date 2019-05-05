@@ -91,8 +91,16 @@ private:
     short inPipeState(long wait_ms) {
         // file descriptor struct to check if pollin bit will be set
         struct pollfd fds = {input_pipe_file_descriptor[0], POLLIN, 0};
-        // poll with no wait time
-        int res = poll(&fds, 1, wait_ms);
+
+        int res = 0;
+        // for -1 values this will continue forever
+        for (long duration = 0; duration != wait_ms; ++duration) {
+            // poll, waiting 1 ms
+            res = poll(&fds, 1, 1);
+
+            // 0 means it timed out, retry
+            if (res != 0) break;
+        }
 
         // if res < 0 then an error occurred with poll
         // POLLERR is set for some other errors
@@ -253,6 +261,10 @@ public:
     void closeOutput() {
         close(output_pipe_file_descriptor[1]);
     }
+
+    void closeInput() {
+        close(input_pipe_file_descriptor[0]);
+    }
 };
 
 /**
@@ -361,6 +373,7 @@ public:
 
     void sendEOF() {
         pipe.closeOutput();
+        pipe.closeInput();
     }
 
     bool isGood() const {
@@ -684,8 +697,7 @@ class Process {
                     this->write_next(processOutput);
                 }
 
-                std::cout << std::endl;
-
+                int x;
                     }));
         }
 

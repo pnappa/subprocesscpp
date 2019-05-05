@@ -16,7 +16,9 @@ int main(int argc, char* argv[]) {
     }
     // do stdin
     if (inFiles.size() == 0) {
+        int counter = 0;
         for (std::string line; std::getline(std::cin, line);) {
+            ++counter;
             std::cout << line << std::endl;
         }
     } else {
