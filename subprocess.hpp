@@ -150,6 +150,7 @@ public:
         output_pipe_file_descriptor[0] = tmp[0];
         output_pipe_file_descriptor[1] = tmp[1];
 
+        // TODO: handle errors for dup2
         dup2(input_pipe_file_descriptor[0], STDIN_FILENO);
         dup2(output_pipe_file_descriptor[1], STDOUT_FILENO);
         // XXX: do we really want stderr merged with stdout?
@@ -373,6 +374,7 @@ public:
 
     void sendEOF() {
         pipe.closeOutput();
+        // XXX: not sure if this is wanted
         pipe.closeInput();
     }
 
