@@ -22,6 +22,7 @@
  */
 
 #define DEFAULT_SUCCS 10
+#define DEBUG false
 atomic_bool needs_signal_cleanup;
 atomic_bool run_waiter;
 
@@ -44,6 +45,9 @@ struct process_comms {
     
     // whether we should ignore this in the cleanup
     bool closed;
+
+    // whether all output from this process has been forwarded on
+    atomic_bool can_close_successors;
 };
 
 // chain of the active processes (could do with a better name)
@@ -106,6 +110,7 @@ struct process_comms* make_process(char* const * program) {
     proc->num_preds = 0;
     proc->closed = false;
     proc->proc_name = program[0];
+    atomic_store(&proc->can_close_successors, false);
 
     bool res = pipe(proc->to_child) < 0;
     res |= pipe(proc->from_child) < 0;
@@ -145,7 +150,10 @@ void close_proc(struct process_comms* proc) {
     close(proc->to_child[1]);
     proc->closed = true;
 
-    printf("closing %s\n", proc->proc_name);
+    // spin until we can continue. XXX: add some yield?
+    while (!atomic_load(&proc->can_close_successors));
+
+    if (DEBUG) printf("closing %s\n", proc->proc_name);
 
     for (int i = 0; i < proc->num_succs; ++i) {
         proc->successors[i]->num_preds--;
@@ -173,7 +181,7 @@ int proc_waiter(void* arg) {
                 int status;
                 pid_t captured_pid = waitpid(-1, &status, WNOHANG);
                 if (captured_pid <= 0) break;
-                printf("closing pid: %d\n", captured_pid);
+                if (DEBUG) printf("closing pid: %d\n", captured_pid);
 
                 mtx_lock(&linked_list_mut);
                 // find the pid and remove it from the linked list
@@ -213,7 +221,7 @@ int pump_output(void* arg) {
     while ((res = fgets(buffer, buflen - 1, p1_reader))) {
         int output_len = strlen(buffer);
         if (proc->num_succs > 0) {
-            printf("piping");
+            if (DEBUG) printf("piping");
             for (int i = 0; i < proc->num_succs; ++i) {
                 write(proc->successors[i]->to_child[1], buffer, output_len);
             }
@@ -221,12 +229,15 @@ int pump_output(void* arg) {
             printf("%s", buffer);
         }
     }
+    // TODO: write to some condition variable s.t. we know that we can close_proc on this one
+    atomic_store(&proc->can_close_successors, true);
+
     return 0;
 }
 
 
 int main(int argc, char* argv[]) {
-    puts("****** START *******");
+    if (DEBUG) puts("****** START *******");
 
     // whether the waitpid thread should keep spinning
     atomic_store(&run_waiter, true);
@@ -238,7 +249,7 @@ int main(int argc, char* argv[]) {
     // thread to lookout for SIGCHLDs
     thrd_t process_waiter;
     int t_suc = thrd_create(&process_waiter, proc_waiter, NULL);
-    printf("THREAD 1: %d\n", t_suc);
+    if (DEBUG) printf("THREAD 1: %d\n", t_suc);
 
     char* prog1[] = {"/bin/echo", "burgers are highly regarded", NULL};
     char* prog2[] = {"/bin/grep", "-o", "hi", NULL};
@@ -251,15 +262,15 @@ int main(int argc, char* argv[]) {
     // connect echo to grep
     add_successor(proc1, proc2);
     // can even have this too, to forward output
-    /*add_successor(proc1, proc2);*/
+    add_successor(proc1, proc2);
 
     thrd_t proc1_pumper;
     t_suc = thrd_create(&proc1_pumper, pump_output, proc1);
-    printf("THREAD 2: %d\n", t_suc);
+    if (DEBUG) printf("THREAD 2: %d\n", t_suc);
 
     thrd_t proc2_pumper;
     t_suc = thrd_create(&proc2_pumper, pump_output, proc2);
-    printf("THREAD 3: %d\n", t_suc);
+    if (DEBUG) printf("THREAD 3: %d\n", t_suc);
 
     // TODO: perhaps have some error handling here, and bloody everywhere
     int res;
@@ -269,5 +280,5 @@ int main(int argc, char* argv[]) {
     atomic_store(&run_waiter, false);
     thrd_join(process_waiter, &res);
 
-    puts("****** END *******");
+    if (DEBUG) puts("****** END *******");
 }
