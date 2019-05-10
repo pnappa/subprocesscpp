@@ -2,7 +2,8 @@
 #include <signal.h>
 #include <stdatomic.h>
 #include <unistd.h>
-#include <threads.h>
+#include <pthread.h>
+#include <sys/prctl.h>
 #include <assert.h>
 #include <sys/wait.h>
 #include <stdio.h>
@@ -22,9 +23,9 @@
  */
 
 #define DEFAULT_SUCCS 10
-#define DEBUG false
-atomic_bool needs_signal_cleanup;
-atomic_bool run_waiter;
+#define DEBUG true
+bool needs_signal_cleanup;
+bool run_waiter;
 
 struct process_comms {
     // stdin, stdout
@@ -71,11 +72,11 @@ void add_successor(struct process_comms* parent, struct process_comms* succ) {
 
 // be sure to use the mutex when reading or writing!
 struct active_processes* root = NULL;
-mtx_t linked_list_mut;
+pthread_mutex_t linked_list_mut;
 
 // append into the linked list
 void append_active_proc(struct process_comms* proc) {
-    mtx_lock(&linked_list_mut);
+    pthread_mutex_lock(&linked_list_mut);
 
     if (root == NULL) {
         root = malloc(sizeof(struct active_processes));
@@ -92,14 +93,14 @@ void append_active_proc(struct process_comms* proc) {
         new->payload = proc;
     }
 
-    mtx_unlock(&linked_list_mut);
+    pthread_mutex_unlock(&linked_list_mut);
 }
 
 // called when signal occurs
 void process_closure(int signum) {
     assert(signum == SIGCHLD);
     // XXX: hmm, we probably should just flip a signal here?
-    atomic_store(&needs_signal_cleanup, true);
+    __atomic_store_n(&needs_signal_cleanup, true, __ATOMIC_SEQ_CST);
 }
 
 /* make the process and add it into the linked list */
@@ -124,7 +125,7 @@ struct process_comms* make_process(char* const * program) {
         dup2(proc->to_child[0], STDIN_FILENO);
         dup2(proc->from_child[1], STDOUT_FILENO);
 
-        // TODO fcntl?
+        prctl(PR_SET_PDEATHSIG, SIGTERM);
         execvp(program[0], program);
         // reach here? something borked
         exit(EXIT_FAILURE);
@@ -160,24 +161,46 @@ void close_proc(struct process_comms* proc) {
     if (DEBUG) printf("closing %s\n", proc->proc_name);
 
     for (int i = 0; i < proc->num_succs; ++i) {
-        proc->successors[i]->num_preds--;
-        if (proc->successors[i]->num_preds == 0) {
+        struct process_comms* next = proc->successors[i];
+        next->num_preds--;
+        if (next->num_preds == 0) {
+            if (next->closed) continue;
+            printf("EOF sent to: %s\n", next->proc_name);
+            // changed this to be non-recursive...the signal can catch the later ones
+            close(next->to_child[1]);
+
             // close this one too, as it has no predecessors remaining.
-            close_proc(proc->successors[i]);
+            /*close_proc(proc->successors[i]);*/
         }
     }
 }
 
+// assumes mutex has been properly obtained
+void remove_linked_list_node(struct active_processes* proc) {
+    if (proc->prev) {
+        proc->prev->next = proc->next;
+    }
+    if (proc->next) {
+        proc->next->prev = proc->prev;
+    }
+
+    if (root == proc) {
+        root = proc->next;
+    }
+
+    free(proc);
+}
+
 /* a long running thread that checks whether there are signals and deals with them */
-int proc_waiter(void* arg) {
+void* proc_waiter(void* arg) {
     // silence IDE's warning, bleh
     (void) (void*) arg;
 
-    while (atomic_load(&run_waiter)) {
+    while (__atomic_load_n(&run_waiter, __ATOMIC_SEQ_CST)) {
         // XXX: switch to weak? we're in a loop
         // use CAS to toggle needs_signal_cleanup to false if it's true, and enter the conditional
         bool does_need_cleanup = true;
-        if (atomic_compare_exchange_strong(&needs_signal_cleanup, &does_need_cleanup, false)) {
+        if (__atomic_compare_exchange_n(&needs_signal_cleanup, &does_need_cleanup, false, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
 
             // go through and find the matching process(es) [signal can catch multiple at once]
             // ensure that we have all children close events
@@ -187,36 +210,32 @@ int proc_waiter(void* arg) {
                 if (captured_pid <= 0) break;
                 if (DEBUG) printf("closing pid: %d\n", captured_pid);
 
-                mtx_lock(&linked_list_mut);
+                pthread_mutex_lock(&linked_list_mut);
                 // find the pid and remove it from the linked list
-                for (struct active_processes* curr = root; curr != NULL; curr = curr->next) {
+                struct active_processes* curr = root;
+                while (curr != NULL) {
 
                     if (curr->payload->pid == captured_pid) {
                         // close this process, and potentially close successors if they're ready
                         close_proc(curr->payload);
 
-                        // remove from linked list
-                        if (curr->prev != NULL) {
-                            curr->prev->next = curr->next;
-                            if (curr->next) curr->next->prev = curr->prev;
-                        }
-
-                        struct active_processes* tmp = curr;
-                        // ensure that the loop will continue properly
-                        if (curr != NULL) curr = curr->prev;
-                        free(tmp);
+                        remove_linked_list_node(curr);
 
                         break;
                     }
+
+                    curr = curr->next;
                 }
-                mtx_unlock(&linked_list_mut);
+                pthread_mutex_unlock(&linked_list_mut);
             }
         }
     }
+
+    return NULL;
 }
 
 /* read the output for proc and if it has a successor, pipe to them, otherwise printf */
-int pump_output(void* arg) {
+void* pump_output(void* arg) {
     struct process_comms* proc = arg;
     const int buflen = 1024;
     char buffer[buflen];
@@ -237,7 +256,7 @@ int pump_output(void* arg) {
     atomic_store(&proc->can_close_successors, true);
     if (DEBUG) printf("can close true for: %s\n", proc->proc_name);
 
-    return 0;
+    return NULL;
 }
 
 
@@ -245,22 +264,24 @@ int main(int argc, char* argv[]) {
     if (DEBUG) puts("****** START *******");
 
     // whether the waitpid thread should keep spinning
-    atomic_store(&run_waiter, true);
-    mtx_init(&linked_list_mut, mtx_plain);
+    __atomic_store_n(&run_waiter, true, __ATOMIC_SEQ_CST);
+    pthread_mutex_init(&linked_list_mut, NULL);
 
     // setup for us to indicate whether we need to close process' pipes
     signal(SIGCHLD, process_closure);
     
     // thread to lookout for SIGCHLDs
-    thrd_t process_waiter;
-    int t_suc = thrd_create(&process_waiter, proc_waiter, NULL);
+    pthread_t process_waiter;
+    int t_suc = pthread_create(&process_waiter, NULL, proc_waiter, NULL);
     if (DEBUG) printf("THREAD 1: %d\n", t_suc);
 
     char* prog1[] = {"/bin/echo", "burgers are highly regarded", NULL};
     char* prog2[] = {"/bin/grep", "-o", "gh", NULL};
+    char* prog3[] = {"/bin/cat", NULL};
 
     struct process_comms* proc1 = make_process(prog1);
     struct process_comms* proc2 = make_process(prog2);
+    /*struct process_comms* proc3 = make_process(prog3);*/
     append_active_proc(proc1);
     append_active_proc(proc2);
 
@@ -269,21 +290,32 @@ int main(int argc, char* argv[]) {
     // can even have this too, to forward output
     add_successor(proc1, proc2);
 
-    thrd_t proc1_pumper;
-    t_suc = thrd_create(&proc1_pumper, pump_output, proc1);
+    pthread_t proc1_pumper;
+    t_suc = pthread_create(&proc1_pumper, NULL, pump_output, proc1);
     if (DEBUG) printf("THREAD 2: %d\n", t_suc);
 
-    thrd_t proc2_pumper;
-    t_suc = thrd_create(&proc2_pumper, pump_output, proc2);
+    pthread_t proc2_pumper;
+    t_suc = pthread_create(&proc2_pumper, NULL, pump_output, proc2);
     if (DEBUG) printf("THREAD 3: %d\n", t_suc);
 
     // TODO: perhaps have some error handling here, and bloody everywhere
     int res;
-    thrd_join(proc1_pumper, &res);
-    thrd_join(proc2_pumper, &res);
+    res = pthread_join(proc1_pumper, NULL);
+    if (DEBUG) printf("THREAD 2 join: %d\n", t_suc);
+    res = pthread_join(proc2_pumper, NULL);
+    if (DEBUG) printf("THREAD 3 join: %d\n", t_suc);
 
-    atomic_store(&run_waiter, false);
-    thrd_join(process_waiter, &res);
+    __atomic_store_n(&run_waiter, false, __ATOMIC_SEQ_CST);
+    res = pthread_join(process_waiter, NULL);
+    if (DEBUG) printf("THREAD 1 join: %d\n", t_suc);
+
+    // cleanup
+    struct active_processes* curr = root;
+    while (curr != NULL) {
+        struct active_processes* tmp = curr->next;
+        remove_linked_list_node(curr);
+        curr = tmp;
+    }
 
     if (DEBUG) puts("****** END *******");
 }
