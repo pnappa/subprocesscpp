@@ -12,14 +12,16 @@
 #include <stdlib.h>
 
 /**
- * Now this one tests me manually piping one process to the next, and catching sigchld
+ * Testing arbitrary and cycling piping setups.
+ *
+ * Current logic error is the an EOF can be sent to a successor if the current has closed,
+ *  but there may be a situation that current still has output to propagate. Might need
+ *  a way to pump output from the close_proc fn.
  *
  * XXX: note, you probably have to compile with musl_gcc, as threads.h isn't easy to find
  */
 
 #define DEFAULT_SUCCS 10
-// v this isn't thread safe too :v , so i've switched to an actual atomic
-/*volatile sig_atomic_t needs_signal_cleanup = 0;*/
 atomic_bool needs_signal_cleanup;
 atomic_bool run_waiter;
 
@@ -28,6 +30,8 @@ struct process_comms {
     int to_child[2];
     int from_child[2];
     pid_t pid;
+
+    const char* proc_name;
 
     // this process can have multiple successors
     int num_succs;
@@ -42,13 +46,12 @@ struct process_comms {
     bool closed;
 };
 
-// TBH what's the point of this
-// just a doubly linked list
+// chain of the active processes (could do with a better name)
 struct active_processes {
     struct active_processes* prev;
     struct active_processes* next;
 
-    struct process_comms payload;
+    struct process_comms* payload;
 };
 
 /* append succ to the successor of parent, resizing if necessary */
@@ -62,8 +65,30 @@ void add_successor(struct process_comms* parent, struct process_comms* succ) {
     succ->num_preds++;
 }
 
-// XXX: not threadsafe, how does this work?
+// be sure to use the mutex when reading or writing!
 struct active_processes* root = NULL;
+mtx_t linked_list_mut;
+
+// append into the linked list
+void append_active_proc(struct process_comms* proc) {
+    mtx_lock(&linked_list_mut);
+
+    if (root == NULL) {
+        root = malloc(sizeof(struct active_processes));
+        root->prev = NULL;
+        root->next = NULL;
+        root->payload = proc;
+    } else {
+        struct active_processes* new = malloc(sizeof(struct active_processes));
+        struct active_processes* last = root;
+        while (last->next != NULL) last = last->next;
+        last->next = new;
+        new->prev = last;
+        new->next = NULL;
+    }
+
+    mtx_unlock(&linked_list_mut);
+}
 
 // called when signal occurs
 void process_closure(int signum) {
@@ -80,6 +105,7 @@ struct process_comms* make_process(char* const * program) {
     proc->num_succs = 0;
     proc->num_preds = 0;
     proc->closed = false;
+    proc->proc_name = program[0];
 
     bool res = pipe(proc->to_child) < 0;
     res |= pipe(proc->from_child) < 0;
@@ -119,7 +145,8 @@ void close_proc(struct process_comms* proc) {
     close(proc->to_child[1]);
     proc->closed = true;
 
-    return;
+    printf("closing %s\n", proc->proc_name);
+
     for (int i = 0; i < proc->num_succs; ++i) {
         proc->successors[i]->num_preds--;
         if (proc->successors[i]->num_preds == 0) {
@@ -146,13 +173,15 @@ int proc_waiter(void* arg) {
                 int status;
                 pid_t captured_pid = waitpid(-1, &status, WNOHANG);
                 if (captured_pid <= 0) break;
+                printf("closing pid: %d\n", captured_pid);
 
+                mtx_lock(&linked_list_mut);
                 // find the pid and remove it from the linked list
                 for (struct active_processes* curr = root; curr != NULL; curr = curr->next) {
 
-                    if (curr->payload.pid == captured_pid) {
+                    if (curr->payload->pid == captured_pid) {
                         // close this process, and potentially close successors if they're ready
-                        close_proc(&curr->payload);
+                        close_proc(curr->payload);
 
                         // remove from linked list
                         if (curr->prev != NULL) {
@@ -168,18 +197,10 @@ int proc_waiter(void* arg) {
                         break;
                     }
                 }
+                mtx_unlock(&linked_list_mut);
             }
         }
     }
-}
-
-// thread target to pass information around
-void connect_process(struct process_comms* p1, struct process_comms* p2) {
-    // some kind of loop to read from p1's output into p2's input
-    // Note, of course we could just dup2 to make p1 write directly to p2, but
-    // we want to support multigraphs, so that's not feasible
-    // this function will be replaced later, adding extra fields to process_comms,
-    // where that processes' thread will pump output to that all "successors"
 }
 
 /* read the output for proc and if it has a successor, pipe to them, otherwise printf */
@@ -192,6 +213,7 @@ int pump_output(void* arg) {
     while ((res = fgets(buffer, buflen - 1, p1_reader))) {
         int output_len = strlen(buffer);
         if (proc->num_succs > 0) {
+            printf("piping");
             for (int i = 0; i < proc->num_succs; ++i) {
                 write(proc->successors[i]->to_child[1], buffer, output_len);
             }
@@ -204,22 +226,27 @@ int pump_output(void* arg) {
 
 
 int main(int argc, char* argv[]) {
+    puts("****** START *******");
 
     // whether the waitpid thread should keep spinning
     atomic_store(&run_waiter, true);
+    mtx_init(&linked_list_mut, mtx_plain);
+
     // setup for us to indicate whether we need to close process' pipes
     signal(SIGCHLD, process_closure);
     
     // thread to lookout for SIGCHLDs
     thrd_t process_waiter;
     int t_suc = thrd_create(&process_waiter, proc_waiter, NULL);
-    printf("waiter: %d\n", t_suc);
+    printf("THREAD 1: %d\n", t_suc);
 
     char* prog1[] = {"/bin/echo", "burgers are highly regarded", NULL};
     char* prog2[] = {"/bin/grep", "-o", "hi", NULL};
 
     struct process_comms* proc1 = make_process(prog1);
     struct process_comms* proc2 = make_process(prog2);
+    append_active_proc(proc1);
+    append_active_proc(proc2);
 
     // connect echo to grep
     add_successor(proc1, proc2);
@@ -228,11 +255,11 @@ int main(int argc, char* argv[]) {
 
     thrd_t proc1_pumper;
     t_suc = thrd_create(&proc1_pumper, pump_output, proc1);
-    printf("pumper: %d\n", t_suc);
+    printf("THREAD 2: %d\n", t_suc);
 
     thrd_t proc2_pumper;
-    t_suc = thrd_create(&proc2_pumper, pump_output, proc1);
-    printf("pumper2: %d\n", t_suc);
+    t_suc = thrd_create(&proc2_pumper, pump_output, proc2);
+    printf("THREAD 3: %d\n", t_suc);
 
     // TODO: perhaps have some error handling here, and bloody everywhere
     int res;
@@ -242,23 +269,5 @@ int main(int argc, char* argv[]) {
     atomic_store(&run_waiter, false);
     thrd_join(process_waiter, &res);
 
-    /*
-        thrd_t pumper;
-        int create_suc = thrd_create(&pumper, pumpdata, NULL);
-        int thread_res;
-
-        struct pollfd fds = {lifetimeComms[0], POLLIN, 0};
-        // if information comes from the comms pipe, it means that the sub-subprocess is finished.
-        int res = poll(&fds, 1, -1);
-        printf("poll res: %d\n", res);
-        // TODO: close stuff?
-        // test res, then set atomic
-        atomic_store(&wranglerFinished, true);
-
-        thrd_join(pumper, &thread_res);
-        // let the wrangler know it can die now
-        char* out = (char*) "ping";
-        write(killComms[1], out, strlen(out));
-    }
-    */
+    puts("****** END *******");
 }
