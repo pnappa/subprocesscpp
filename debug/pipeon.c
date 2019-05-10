@@ -18,8 +18,11 @@
  */
 
 #define DEFAULT_SUCCS 10
+// v this isn't thread safe too :v , so i've switched to an actual atomic
+/*volatile sig_atomic_t needs_signal_cleanup = 0;*/
+atomic_bool needs_signal_cleanup;
+atomic_bool run_waiter;
 
-// TODO: perhaps know what process is next so we can waterfall closures?
 struct process_comms {
     // stdin, stdout
     int to_child[2];
@@ -32,8 +35,11 @@ struct process_comms {
     int capacity;
     struct process_comms** successors;
 
-    // XXX: add the concept of predecessors, as we need to know whether all inputs to a prog
-    // have closed?
+    // as we need to know whether all inputs to a prog have closed?
+    int num_preds;
+    
+    // whether we should ignore this in the cleanup
+    bool closed;
 };
 
 // TBH what's the point of this
@@ -53,6 +59,7 @@ void add_successor(struct process_comms* parent, struct process_comms* succ) {
     }
 
     parent->successors[parent->num_succs++] = succ;
+    succ->num_preds++;
 }
 
 // XXX: not threadsafe, how does this work?
@@ -61,65 +68,9 @@ struct active_processes* root = NULL;
 // called when signal occurs
 void process_closure(int signum) {
     assert(signum == SIGCHLD);
-
-    // go through and find the matching process(es) [signal can catch multiple at once]
-    // ensure that we have all children close events
-    while (true) {
-        int status;
-        pid_t captured_pid = waitpid(-1, &status, WNOHANG);
-        if (captured_pid <= 0) break;
-
-        // find the pid and remove it from the linked list
-        for (struct active_processes* curr = root; curr != NULL; curr = curr->next) {
-            if (curr->payload.pid == captured_pid) {
-                // XXX: what else was i supposed to do, can't remember
-                // maybe close output, and indicate the next should close?
-                close(curr->payload.to_child[1]);
-                // TODO: err handling ^
-                // TODO: perhaps withdraw all remaining info? i guess that's fine
-                // TODO: perhaps send EOF to next proc? idk
-        
-                // remove from linked list
-                if (curr->prev != NULL) {
-                    curr->prev->next = curr->next;
-                    if (curr->next) curr->next->prev = curr->prev;
-                }
-
-                struct active_processes* tmp = curr;
-                // ensure that the loop will continue properly
-                curr = curr->prev;
-                // XXX: err, this doesn't seem right, I think we actually want to keep it around
-                // then when the stdout is closed, we can close the stdin for the next prog
-                free(tmp);
-                
-                break;
-            }
-        }
-    }
+    // XXX: hmm, we probably should just flip a signal here?
+    atomic_store(&needs_signal_cleanup, true);
 }
-
-/*
-// called by the main process' thread, which reads from stdin, and forwards to the subsubprocess
-int pumpdata(void* arg) {
-    char buffer[1024];
-    FILE* reader = fdopen(from_child[0], "r");
-    while (!atomic_load(&wranglerFinished)) {
-        // read a line of input from the user
-        char* res = fgets(buffer, 1023, stdin);
-        // close stdin 
-        if (!res) {
-            close(to_child[1]);
-            break;
-        }
-        // write to pipe
-        write(to_child[1], buffer, strlen(buffer));
-
-        // we'll expect a pinged line back from cat 
-        fgets(buffer, 1023, reader);
-        printf("readline: %s\n", buffer);
-    }
-}
-*/
 
 /* make the process and add it into the linked list */
 struct process_comms* make_process(char* const * program) {
@@ -127,12 +78,11 @@ struct process_comms* make_process(char* const * program) {
     proc->capacity = DEFAULT_SUCCS;
     proc->successors = malloc(sizeof(struct process_comms*)* proc->capacity);
     proc->num_succs = 0;
+    proc->num_preds = 0;
+    proc->closed = false;
 
     bool res = pipe(proc->to_child) < 0;
     res |= pipe(proc->from_child) < 0;
-
-    // setup for us to close any processes' pipes when they die
-    signal(SIGCHLD, process_closure);
 
     pid_t pid = fork();
     // our process to exec
@@ -158,6 +108,81 @@ struct process_comms* make_process(char* const * program) {
     return proc;
 }
 
+/* close this process, potentially recursively closing others if the successors for this one
+ * have all predecessors closed
+ * closing means to close the stdin. */
+void close_proc(struct process_comms* proc) {
+    // awkward recursive closure case?
+    if (proc->closed) return;
+
+    // close the stdin (this may either be a terminated process, or a running process)
+    close(proc->to_child[1]);
+    proc->closed = true;
+
+    for (int i = 0; i < proc->num_succs; ++i) {
+        proc->successors[i]->num_preds--;
+        if (proc->successors[i]->num_preds == 0) {
+            // close this one too, as it has no predecessors remaining.
+            close_proc(proc->successors[i]);
+        }
+    }
+}
+
+/* a long running thread that checks whether there are signals and deals with them */
+int proc_waiter(void* arg) {
+    // silence IDE's warning, bleh
+    (void) (void*) arg;
+
+    while (atomic_load(&run_waiter)) {
+        // perhaps this can be switched to an cond variable. hard to think about re-entrancy
+        if (atomic_load(&needs_signal_cleanup)) {
+
+            // go through and find the matching process(es) [signal can catch multiple at once]
+            // ensure that we have all children close events
+            while (true) {
+                int status;
+                pid_t captured_pid = waitpid(-1, &status, WNOHANG);
+                if (captured_pid <= 0) break;
+
+                // find the pid and remove it from the linked list
+                for (struct active_processes* curr = root; curr != NULL; curr = curr->next) {
+
+                    if (curr->payload.pid == captured_pid) {
+                        // close this process, and potentially close successors if they're ready
+                        close_proc(&curr->payload);
+
+                        // XXX: this feels like it could be merged into close_proc.
+//                        struct process_comms* proc = &curr->payload;
+//                        close(curr->payload.to_child[1]);
+//                        for (int i = 0; i < proc->num_succs; ++i) {
+//                            proc->successors[i]->num_preds--;
+//                            if (proc->successors[i]->num_preds == 0) {
+//                                close_proc(proc->successors[i]);
+//                            }
+//                        }
+
+                        // remove from linked list
+                        if (curr->prev != NULL) {
+                            curr->prev->next = curr->next;
+                            if (curr->next) curr->next->prev = curr->prev;
+                        }
+
+                        struct active_processes* tmp = curr;
+                        // ensure that the loop will continue properly
+                        if (curr != NULL) curr = curr->prev;
+                        free(tmp);
+
+                        break;
+                    }
+                }
+            }
+
+            needs_signal_cleanup = 0;
+            atomic_store(&needs_signal_cleanup, false);
+        }
+    }
+}
+
 // thread target to pass information around
 void connect_process(struct process_comms* p1, struct process_comms* p2) {
     // some kind of loop to read from p1's output into p2's input
@@ -169,6 +194,16 @@ void connect_process(struct process_comms* p1, struct process_comms* p2) {
 
 
 int main(int argc, char* argv[]) {
+
+    // whether the waitpid thread should keep spinning
+    atomic_store(&run_waiter, true);
+    // setup for us to indicate whether we need to close process' pipes
+    signal(SIGCHLD, process_closure);
+    
+    // thread to lookout for SIGCHLDs
+    thrd_t process_waiter;
+    int t_suc = thrd_create(&process_waiter, proc_waiter, NULL);
+
     char* prog1[] = {"/bin/echo", "burgers are highly regarded", NULL};
     char* prog2[] = {"/bin/grep", "-o", "hi", NULL};
 
