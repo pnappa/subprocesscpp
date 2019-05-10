@@ -119,6 +119,7 @@ void close_proc(struct process_comms* proc) {
     close(proc->to_child[1]);
     proc->closed = true;
 
+    return;
     for (int i = 0; i < proc->num_succs; ++i) {
         proc->successors[i]->num_preds--;
         if (proc->successors[i]->num_preds == 0) {
@@ -134,8 +135,10 @@ int proc_waiter(void* arg) {
     (void) (void*) arg;
 
     while (atomic_load(&run_waiter)) {
-        // perhaps this can be switched to an cond variable. hard to think about re-entrancy
-        if (atomic_load(&needs_signal_cleanup)) {
+        // XXX: switch to weak? we're in a loop
+        // use CAS to toggle needs_signal_cleanup to false if it's true, and enter the conditional
+        bool does_need_cleanup = true;
+        if (atomic_compare_exchange_strong(&needs_signal_cleanup, &does_need_cleanup, false)) {
 
             // go through and find the matching process(es) [signal can catch multiple at once]
             // ensure that we have all children close events
@@ -150,16 +153,6 @@ int proc_waiter(void* arg) {
                     if (curr->payload.pid == captured_pid) {
                         // close this process, and potentially close successors if they're ready
                         close_proc(&curr->payload);
-
-                        // XXX: this feels like it could be merged into close_proc.
-//                        struct process_comms* proc = &curr->payload;
-//                        close(curr->payload.to_child[1]);
-//                        for (int i = 0; i < proc->num_succs; ++i) {
-//                            proc->successors[i]->num_preds--;
-//                            if (proc->successors[i]->num_preds == 0) {
-//                                close_proc(proc->successors[i]);
-//                            }
-//                        }
 
                         // remove from linked list
                         if (curr->prev != NULL) {
@@ -176,9 +169,6 @@ int proc_waiter(void* arg) {
                     }
                 }
             }
-
-            needs_signal_cleanup = 0;
-            atomic_store(&needs_signal_cleanup, false);
         }
     }
 }
@@ -192,6 +182,26 @@ void connect_process(struct process_comms* p1, struct process_comms* p2) {
     // where that processes' thread will pump output to that all "successors"
 }
 
+/* read the output for proc and if it has a successor, pipe to them, otherwise printf */
+int pump_output(void* arg) {
+    struct process_comms* proc = arg;
+    const int buflen = 1024;
+    char buffer[buflen];
+    FILE* p1_reader = fdopen(proc->from_child[0], "r");
+    char* res;
+    while ((res = fgets(buffer, buflen - 1, p1_reader))) {
+        int output_len = strlen(buffer);
+        if (proc->num_succs > 0) {
+            for (int i = 0; i < proc->num_succs; ++i) {
+                write(proc->successors[i]->to_child[1], buffer, output_len);
+            }
+        } else {
+            printf("%s", buffer);
+        }
+    }
+    return 0;
+}
+
 
 int main(int argc, char* argv[]) {
 
@@ -203,6 +213,7 @@ int main(int argc, char* argv[]) {
     // thread to lookout for SIGCHLDs
     thrd_t process_waiter;
     int t_suc = thrd_create(&process_waiter, proc_waiter, NULL);
+    printf("waiter: %d\n", t_suc);
 
     char* prog1[] = {"/bin/echo", "burgers are highly regarded", NULL};
     char* prog2[] = {"/bin/grep", "-o", "hi", NULL};
@@ -213,31 +224,23 @@ int main(int argc, char* argv[]) {
     // connect echo to grep
     add_successor(proc1, proc2);
     // can even have this too, to forward output
-    add_successor(proc1, proc2);
+    /*add_successor(proc1, proc2);*/
 
-    const int buflen = 1024;
-    char buffer[buflen];
-    FILE* p1_reader = fdopen(proc1->from_child[0], "r");
-    char* res;
-    while ((res = fgets(buffer, buflen - 1, p1_reader))) {
-        int output_len = strlen(buffer);
-        for (int i = 0; i < proc1->num_succs; ++i) {
-            write(proc1->successors[i]->to_child[1], buffer, output_len);
-        }
-    }
+    thrd_t proc1_pumper;
+    t_suc = thrd_create(&proc1_pumper, pump_output, proc1);
+    printf("pumper: %d\n", t_suc);
 
-    // now let's be lazy and just read output from each of the successors of proc1
-    // this would be done in a thread, i suppose
-    // we would want to drain the output of the pipe as otherwise after like 65k it gets clogged
-    for (int i = 0; i < proc1->num_succs; ++i) {
-        FILE* succ_reader = fdopen(proc1->successors[i]->from_child[0], "r");
-        // we assume that all the predecessors for this are closed, in a future version we'll
-        // make sure.
-        close(proc1->successors[i]->to_child[1]);
-        while ((res = fgets(buffer, buflen - 1, succ_reader))) {
-            printf("%s", buffer);
-        }
-    }
+    thrd_t proc2_pumper;
+    t_suc = thrd_create(&proc2_pumper, pump_output, proc1);
+    printf("pumper2: %d\n", t_suc);
+
+    // TODO: perhaps have some error handling here, and bloody everywhere
+    int res;
+    thrd_join(proc1_pumper, &res);
+    thrd_join(proc2_pumper, &res);
+
+    atomic_store(&run_waiter, false);
+    thrd_join(process_waiter, &res);
 
     /*
         thrd_t pumper;
