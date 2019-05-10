@@ -22,7 +22,7 @@
  */
 
 #define DEFAULT_SUCCS 10
-#define DEBUG false
+#define DEBUG true
 atomic_bool needs_signal_cleanup;
 atomic_bool run_waiter;
 
@@ -150,6 +150,8 @@ void close_proc(struct process_comms* proc) {
     close(proc->to_child[1]);
     proc->closed = true;
 
+    if (DEBUG) printf("about to close %s\n", proc->proc_name);
+
     // spin until we can continue. XXX: add some yield?
     while (!atomic_load(&proc->can_close_successors));
 
@@ -231,6 +233,7 @@ int pump_output(void* arg) {
     }
     // TODO: write to some condition variable s.t. we know that we can close_proc on this one
     atomic_store(&proc->can_close_successors, true);
+    printf("can close true for: %s\n", proc->proc_name);
 
     return 0;
 }
@@ -252,17 +255,23 @@ int main(int argc, char* argv[]) {
     if (DEBUG) printf("THREAD 1: %d\n", t_suc);
 
     char* prog1[] = {"/bin/echo", "burgers are highly regarded", NULL};
-    char* prog2[] = {"/bin/grep", "-o", "hi", NULL};
+    char* prog2[] = {"/bin/cat", NULL};
+    char* prog3[] = {"/bin/cat", NULL};
+    //char* prog2[] = {"/bin/grep", "-o", "highly", NULL};
+    //char* prog3[] = {"/bin/grep", "-o", "gh", NULL};
 
     struct process_comms* proc1 = make_process(prog1);
     struct process_comms* proc2 = make_process(prog2);
+    struct process_comms* proc3 = make_process(prog3);
     append_active_proc(proc1);
     append_active_proc(proc2);
+    append_active_proc(proc3);
 
     // connect echo to grep
     add_successor(proc1, proc2);
     // can even have this too, to forward output
     add_successor(proc1, proc2);
+    add_successor(proc2, proc3);
 
     thrd_t proc1_pumper;
     t_suc = thrd_create(&proc1_pumper, pump_output, proc1);
@@ -272,10 +281,15 @@ int main(int argc, char* argv[]) {
     t_suc = thrd_create(&proc2_pumper, pump_output, proc2);
     if (DEBUG) printf("THREAD 3: %d\n", t_suc);
 
+    thrd_t proc3_pumper;
+    t_suc = thrd_create(&proc3_pumper, pump_output, proc3);
+    if (DEBUG) printf("THREAD 4: %d\n", t_suc);
+
     // TODO: perhaps have some error handling here, and bloody everywhere
     int res;
     thrd_join(proc1_pumper, &res);
     thrd_join(proc2_pumper, &res);
+    thrd_join(proc3_pumper, &res);
 
     atomic_store(&run_waiter, false);
     thrd_join(process_waiter, &res);
