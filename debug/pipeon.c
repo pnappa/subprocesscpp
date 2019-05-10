@@ -17,6 +17,7 @@
  * XXX: note, you probably have to compile with musl_gcc, as threads.h isn't easy to find
  */
 
+#define DEFAULT_SUCCS 10
 
 // TODO: perhaps know what process is next so we can waterfall closures?
 struct process_comms {
@@ -24,8 +25,18 @@ struct process_comms {
     int to_child[2];
     int from_child[2];
     pid_t pid;
+
+    // this process can have multiple successors
+    int num_succs;
+    // amount of space in the successors array
+    int capacity;
+    struct process_comms** successors;
+
+    // XXX: add the concept of predecessors, as we need to know whether all inputs to a prog
+    // have closed?
 };
 
+// TBH what's the point of this
 // just a doubly linked list
 struct active_processes {
     struct active_processes* prev;
@@ -33,6 +44,16 @@ struct active_processes {
 
     struct process_comms payload;
 };
+
+/* append succ to the successor of parent, resizing if necessary */
+void add_successor(struct process_comms* parent, struct process_comms* succ) {
+    if (parent->num_succs == parent->capacity) {
+        parent->capacity *= 2;
+        parent->successors = realloc(parent->successors, sizeof(struct process_comms*) * parent->capacity);
+    }
+
+    parent->successors[parent->num_succs++] = succ;
+}
 
 // XXX: not threadsafe, how does this work?
 struct active_processes* root = NULL;
@@ -103,6 +124,9 @@ int pumpdata(void* arg) {
 /* make the process and add it into the linked list */
 struct process_comms* make_process(char* const * program) {
     struct process_comms* proc = malloc(sizeof(struct process_comms));
+    proc->capacity = DEFAULT_SUCCS;
+    proc->successors = malloc(sizeof(struct process_comms*)* proc->capacity);
+    proc->num_succs = 0;
 
     bool res = pipe(proc->to_child) < 0;
     res |= pipe(proc->from_child) < 0;
@@ -151,22 +175,34 @@ int main(int argc, char* argv[]) {
     struct process_comms* proc1 = make_process(prog1);
     struct process_comms* proc2 = make_process(prog2);
 
+    // connect echo to grep
+    add_successor(proc1, proc2);
+    // can even have this too, to forward output
+    add_successor(proc1, proc2);
+
     const int buflen = 1024;
     char buffer[buflen];
     FILE* p1_reader = fdopen(proc1->from_child[0], "r");
     char* res;
     while ((res = fgets(buffer, buflen - 1, p1_reader))) {
-        write(proc2->to_child[1], buffer, strlen(buffer));
-    }
-    // here we know that prog1 has finished..?
-    // XXX: temp, the signal probably should handle this
-    /*close(proc1->from_child[0]);*/
-    FILE* p2_reader = fdopen(proc2->from_child[0], "r");
-    close(proc2->to_child[1]);
-    while ((res = fgets(buffer, buflen - 1, p2_reader))) {
-        printf("%s", buffer);
+        int output_len = strlen(buffer);
+        for (int i = 0; i < proc1->num_succs; ++i) {
+            write(proc1->successors[i]->to_child[1], buffer, output_len);
+        }
     }
 
+    // now let's be lazy and just read output from each of the successors of proc1
+    // this would be done in a thread, i suppose
+    // we would want to drain the output of the pipe as otherwise after like 65k it gets clogged
+    for (int i = 0; i < proc1->num_succs; ++i) {
+        FILE* succ_reader = fdopen(proc1->successors[i]->from_child[0], "r");
+        // we assume that all the predecessors for this are closed, in a future version we'll
+        // make sure.
+        close(proc1->successors[i]->to_child[1]);
+        while ((res = fgets(buffer, buflen - 1, succ_reader))) {
+            printf("%s", buffer);
+        }
+    }
 
     /*
         thrd_t pumper;
