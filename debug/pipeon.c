@@ -259,6 +259,17 @@ void* pump_output(void* arg) {
     return NULL;
 }
 
+pthread_t pumper_thread(struct process_comms* proc) {
+    pthread_t proc_pumper;
+    int t_suc = pthread_create(&proc_pumper, NULL, pump_output, proc);
+    if (DEBUG) printf("THREAD 2: %d\n", t_suc);
+    return proc_pumper;
+}
+
+void wait_pumper(pthread_t proc_thr) {
+    int res = pthread_join(proc_thr, NULL);
+    if (DEBUG) printf("THREAD join: %d\n", res);
+}
 
 int main(int argc, char* argv[]) {
     if (DEBUG) puts("****** START *******");
@@ -281,33 +292,29 @@ int main(int argc, char* argv[]) {
 
     struct process_comms* proc1 = make_process(prog1);
     struct process_comms* proc2 = make_process(prog2);
-    /*struct process_comms* proc3 = make_process(prog3);*/
+    struct process_comms* proc3 = make_process(prog3);
     append_active_proc(proc1);
     append_active_proc(proc2);
+    append_active_proc(proc3);
 
     // connect echo to grep
     add_successor(proc1, proc2);
     // can even have this too, to forward output
     add_successor(proc1, proc2);
+    add_successor(proc1, proc3);
 
-    pthread_t proc1_pumper;
-    t_suc = pthread_create(&proc1_pumper, NULL, pump_output, proc1);
-    if (DEBUG) printf("THREAD 2: %d\n", t_suc);
+    pthread_t proc1_pumper = pumper_thread(proc1);
+    pthread_t proc2_pumper = pumper_thread(proc2);
+    pthread_t proc3_pumper = pumper_thread(proc3);
 
-    pthread_t proc2_pumper;
-    t_suc = pthread_create(&proc2_pumper, NULL, pump_output, proc2);
-    if (DEBUG) printf("THREAD 3: %d\n", t_suc);
+    wait_pumper(proc1_pumper);
+    wait_pumper(proc2_pumper);
+    wait_pumper(proc3_pumper);
 
-    // TODO: perhaps have some error handling here, and bloody everywhere
-    int res;
-    res = pthread_join(proc1_pumper, NULL);
-    if (DEBUG) printf("THREAD 2 join: %d\n", t_suc);
-    res = pthread_join(proc2_pumper, NULL);
-    if (DEBUG) printf("THREAD 3 join: %d\n", t_suc);
 
     __atomic_store_n(&run_waiter, false, __ATOMIC_SEQ_CST);
-    res = pthread_join(process_waiter, NULL);
-    if (DEBUG) printf("THREAD 1 join: %d\n", t_suc);
+    int res = pthread_join(process_waiter, NULL);
+    if (DEBUG) printf("THREAD 1 join: %d\n", res);
 
     // cleanup
     struct active_processes* curr = root;
