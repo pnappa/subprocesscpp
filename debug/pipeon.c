@@ -19,11 +19,12 @@
  *  but there may be a situation that current still has output to propagate. Might need
  *  a way to pump output from the close_proc fn.
  *
- * XXX: note, you probably have to compile with musl_gcc, as threads.h isn't easy to find
+ * Compile with clang -g -std=c11 pipeon.c -lpthread
  */
 
 #define DEFAULT_SUCCS 10
 #define DEBUG true
+/*#define DEBUG false */
 bool needs_signal_cleanup;
 bool run_waiter;
 
@@ -157,6 +158,8 @@ void close_proc(struct process_comms* proc) {
 
     // spin until we can continue. XXX: add some yield?
     while (!atomic_load(&proc->can_close_successors));
+    // ^ this logic isn't enough if there are two disjoint processes piping into one.
+    // ...actually no, it might be.
 
     if (DEBUG) printf("closing %s\n", proc->proc_name);
 
@@ -165,7 +168,7 @@ void close_proc(struct process_comms* proc) {
         next->num_preds--;
         if (next->num_preds == 0) {
             if (next->closed) continue;
-            printf("EOF sent to: %s\n", next->proc_name);
+            if (DEBUG) printf("EOF sent to: %s\n", next->proc_name);
             // changed this to be non-recursive...the signal can catch the later ones
             close(next->to_child[1]);
 
@@ -242,6 +245,7 @@ void* pump_output(void* arg) {
     FILE* p1_reader = fdopen(proc->from_child[0], "r");
     char* res;
     while ((res = fgets(buffer, buflen - 1, p1_reader))) {
+        if (DEBUG) printf("read line for %s: %s", proc->proc_name, buffer);
         int output_len = strlen(buffer);
         if (proc->num_succs > 0) {
             if (DEBUG) printf("piping");
@@ -252,7 +256,8 @@ void* pump_output(void* arg) {
             printf("%s", buffer);
         }
     }
-    // TODO: write to some condition variable s.t. we know that we can close_proc on this one
+
+    // let the proc_waiter thread know it can finish
     atomic_store(&proc->can_close_successors, true);
     if (DEBUG) printf("can close true for: %s\n", proc->proc_name);
 
@@ -288,7 +293,7 @@ int main(int argc, char* argv[]) {
 
     char* prog1[] = {"/bin/echo", "burgers are highly regarded", NULL};
     char* prog2[] = {"/bin/grep", "-o", "gh", NULL};
-    char* prog3[] = {"/bin/cat", NULL};
+    char* prog3[] = {"/bin/echo", NULL};
 
     struct process_comms* proc1 = make_process(prog1);
     struct process_comms* proc2 = make_process(prog2);
@@ -300,8 +305,8 @@ int main(int argc, char* argv[]) {
     // connect echo to grep
     add_successor(proc1, proc2);
     // can even have this too, to forward output
-    add_successor(proc1, proc2);
-    add_successor(proc1, proc3);
+    /*add_successor(proc1, proc2);*/
+    add_successor(proc2, proc3);
 
     pthread_t proc1_pumper = pumper_thread(proc1);
     pthread_t proc2_pumper = pumper_thread(proc2);
@@ -310,7 +315,6 @@ int main(int argc, char* argv[]) {
     wait_pumper(proc1_pumper);
     wait_pumper(proc2_pumper);
     wait_pumper(proc3_pumper);
-
 
     __atomic_store_n(&run_waiter, false, __ATOMIC_SEQ_CST);
     int res = pthread_join(process_waiter, NULL);
