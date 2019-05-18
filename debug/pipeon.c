@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809
 #include <signal.h>
+#include <ctype.h>
 #include <stdatomic.h>
 #include <unistd.h>
 #include <pthread.h>
@@ -237,15 +238,41 @@ void* proc_waiter(void* arg) {
     return NULL;
 }
 
+bool iseol(char c) {
+    return c == '\n' || c == '\0';
+}
+
 /* read the output for proc and if it has a successor, pipe to them, otherwise printf */
 void* pump_output(void* arg) {
     struct process_comms* proc = arg;
+    const int WAITLEN = 1;
     const int buflen = 1024;
-    char buffer[buflen];
-    FILE* p1_reader = fdopen(proc->from_child[0], "r");
-    char* res;
-    while ((res = fgets(buffer, buflen - 1, p1_reader))) {
+    /*FILE* p1_reader = fdopen(proc->from_child[0], "r");*/
+    int pollRes;
+    struct pollfd fds = {proc->from_child[0], POLLIN, 0};
+    while ((pollRes = poll(&fds, 1, WAITLEN)) >= 0) {
+        // just a timeout, continue
+        if (pollRes == 0) continue;
+        printf("boop\n");
+
+        char buffer[buflen];
+        buffer[0] = '\0';
+
+        // otherwise, we have some error or it's all hunky dory.
+        // no err handling rn, so it's all good
+
+        // XXX: let's just assume the line to read is at most buffer length
+        char curr;
+        while (read(proc->from_child[0], &curr, 1), !iseol(curr)) {
+            printf("read char: %c\n", curr);
+            strncat(buffer, &curr, 1);
+        }
+        // just manually append a newline
+        curr = '\n';
+        strncat(buffer, &curr, 1);
+
         if (DEBUG) printf("read line for %s: %s", proc->proc_name, buffer);
+
         int output_len = strlen(buffer);
         if (proc->num_succs > 0) {
             if (DEBUG) printf("piping");
@@ -255,6 +282,9 @@ void* pump_output(void* arg) {
         } else {
             printf("%s", buffer);
         }
+        
+        // file descriptor has been closed
+        if (fds.revents & POLLHUP) break;
     }
 
     // let the proc_waiter thread know it can finish
@@ -293,28 +323,28 @@ int main(int argc, char* argv[]) {
 
     char* prog1[] = {"/bin/echo", "burgers are highly regarded", NULL};
     char* prog2[] = {"/bin/grep", "-o", "gh", NULL};
-    char* prog3[] = {"/bin/echo", NULL};
+    char* prog3[] = {"/bin/cat", NULL};
 
     struct process_comms* proc1 = make_process(prog1);
     struct process_comms* proc2 = make_process(prog2);
     struct process_comms* proc3 = make_process(prog3);
     append_active_proc(proc1);
     append_active_proc(proc2);
-    append_active_proc(proc3);
+    /*append_active_proc(proc3);*/
 
     // connect echo to grep
     add_successor(proc1, proc2);
     // can even have this too, to forward output
     /*add_successor(proc1, proc2);*/
-    add_successor(proc2, proc3);
+    /*add_successor(proc2, proc3);*/
 
     pthread_t proc1_pumper = pumper_thread(proc1);
     pthread_t proc2_pumper = pumper_thread(proc2);
-    pthread_t proc3_pumper = pumper_thread(proc3);
+    /*pthread_t proc3_pumper = pumper_thread(proc3);*/
 
     wait_pumper(proc1_pumper);
     wait_pumper(proc2_pumper);
-    wait_pumper(proc3_pumper);
+    /*wait_pumper(proc3_pumper);*/
 
     __atomic_store_n(&run_waiter, false, __ATOMIC_SEQ_CST);
     int res = pthread_join(process_waiter, NULL);
