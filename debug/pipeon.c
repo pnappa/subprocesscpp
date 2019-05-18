@@ -1,6 +1,5 @@
 #define _POSIX_C_SOURCE 200809
 #include <signal.h>
-#include <ctype.h>
 #include <stdatomic.h>
 #include <unistd.h>
 #include <pthread.h>
@@ -238,41 +237,15 @@ void* proc_waiter(void* arg) {
     return NULL;
 }
 
-bool iseol(char c) {
-    return c == '\n' || c == '\0';
-}
-
 /* read the output for proc and if it has a successor, pipe to them, otherwise printf */
 void* pump_output(void* arg) {
     struct process_comms* proc = arg;
-    const int WAITLEN = 1;
     const int buflen = 1024;
-    /*FILE* p1_reader = fdopen(proc->from_child[0], "r");*/
-    int pollRes;
-    struct pollfd fds = {proc->from_child[0], POLLIN, 0};
-    while ((pollRes = poll(&fds, 1, WAITLEN)) >= 0) {
-        // just a timeout, continue
-        if (pollRes == 0) continue;
-        printf("boop\n");
-
-        char buffer[buflen];
-        buffer[0] = '\0';
-
-        // otherwise, we have some error or it's all hunky dory.
-        // no err handling rn, so it's all good
-
-        // XXX: let's just assume the line to read is at most buffer length
-        char curr;
-        while (read(proc->from_child[0], &curr, 1), !iseol(curr)) {
-            printf("read char: %c\n", curr);
-            strncat(buffer, &curr, 1);
-        }
-        // just manually append a newline
-        curr = '\n';
-        strncat(buffer, &curr, 1);
-
+    char buffer[buflen];
+    FILE* p1_reader = fdopen(proc->from_child[0], "r");
+    char* res;
+    while ((res = fgets(buffer, buflen - 1, p1_reader))) {
         if (DEBUG) printf("read line for %s: %s", proc->proc_name, buffer);
-
         int output_len = strlen(buffer);
         if (proc->num_succs > 0) {
             if (DEBUG) printf("piping");
@@ -282,9 +255,6 @@ void* pump_output(void* arg) {
         } else {
             printf("%s", buffer);
         }
-        
-        // file descriptor has been closed
-        if (fds.revents & POLLHUP) break;
     }
 
     // let the proc_waiter thread know it can finish
